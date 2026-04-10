@@ -135,6 +135,14 @@ python scripts/fetch.py --batch dois.txt --out ~/papers
 
 > 帮我把 AlphaFold2 那篇论文下到 `~/papers`
 
+> 帮我下载这个 DOI 的 PDF：10.1038/s41586-020-2649-2
+
+> 下载这三篇论文：10.1038/s41586-021-03819-2, 10.1126/science.abj8754, 10.1101/2023.01.01.522400
+
+> 看看这篇论文有没有开放获取的 PDF：10.1038/s41586-020-2649-2
+
+> 把 dois.txt 里的所有 DOI 批量下载到 ~/papers
+
 ## 解析顺序
 
 1. **Unpaywall** — 全出版社 OA 最佳位置（命中率最高）

@@ -147,6 +147,14 @@ Or just ask your agent naturally:
 
 > Download the AlphaFold2 paper PDF to my `~/papers` folder
 
+> Fetch the PDF for DOI 10.1038/s41586-020-2649-2
+
+> Download these three papers: 10.1038/s41586-021-03819-2, 10.1126/science.abj8754, 10.1101/2023.01.01.522400
+
+> Check if this paper has an open-access PDF available: 10.1038/s41586-020-2649-2
+
+> Batch download all DOIs from my dois.txt file into ~/papers
+
 ## Resolution Order
 
 1. **Unpaywall** — best OA location across all publishers (highest hit rate)
