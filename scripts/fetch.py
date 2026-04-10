@@ -7,8 +7,10 @@ arXiv -> PMC OA -> bioRxiv/medRxiv.
 Exit codes:
   0  success (all DOIs resolved)
   1  runtime error (some DOIs failed, network issues)
-  2  auth error (missing UNPAYWALL_EMAIL)
   3  validation error (bad arguments)
+
+If UNPAYWALL_EMAIL is not set, the Unpaywall source is skipped
+and the remaining 4 sources are still tried.
 """
 from __future__ import annotations
 
@@ -29,11 +31,42 @@ import os
 EMAIL = os.environ.get("UNPAYWALL_EMAIL", "").strip()
 UA = f"paper-fetch/0.1 (mailto:{EMAIL or 'anonymous'})"
 TIMEOUT = 30
+MAX_PDF_SIZE = 50 * 1024 * 1024  # 50 MB
 
 EXIT_SUCCESS = 0
 EXIT_RUNTIME = 1
 EXIT_AUTH = 2
 EXIT_VALIDATION = 3
+
+ALLOWED_HOSTS = {
+    "api.unpaywall.org",
+    "unpaywall.org",
+    "arxiv.org",
+    "www.ncbi.nlm.nih.gov",
+    "api.semanticscholar.org",
+    "api.biorxiv.org",
+    "www.biorxiv.org",
+    "www.medrxiv.org",
+    "europepmc.org",
+    "www.nature.com",
+    "link.springer.com",
+    "journals.plos.org",
+    "elifesciences.org",
+    "www.cell.com",
+    "www.science.org",
+    "academic.oup.com",
+    "pubs.acs.org",
+    "onlinelibrary.wiley.com",
+    "www.frontiersin.org",
+    "www.mdpi.com",
+    "peerj.com",
+    "royalsocietypublishing.org",
+    "www.pnas.org",
+    "proceedings.mlr.press",
+    "openreview.net",
+    "dl.acm.org",
+    "ieeexplore.ieee.org",
+}
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -96,18 +129,38 @@ def _get_json(url: str):
     return json.loads(_get(url).decode("utf-8"))
 
 
-def _download(url: str, dest: Path) -> bool:
+def _is_allowed_host(url: str) -> bool:
+    """Check if the URL's host is in the allowlist."""
+    try:
+        host = urllib.parse.urlparse(url).hostname or ""
+    except Exception:
+        return False
+    return host in ALLOWED_HOSTS
+
+
+def _download(url: str, dest: Path) -> str | None:
+    """Download a PDF. Returns None on success, or an error message string."""
+    if not _is_allowed_host(url):
+        _log(f"  blocked: host not in allowlist for {url}")
+        return "host_not_allowed"
     try:
         data = _get(url, accept="application/pdf")
     except Exception as e:
         _log(f"  download failed: {e}")
-        return False
+        return "network_error"
+    if len(data) > MAX_PDF_SIZE:
+        _log(f"  response too large: {len(data)} bytes (limit {MAX_PDF_SIZE})")
+        return "size_exceeded"
     if not data[:5].startswith(b"%PDF"):
         _log("  response was not a PDF")
-        return False
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(data)
-    return True
+        return "not_a_pdf"
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    except OSError as e:
+        _log(f"  write failed: {e}")
+        return "io_error"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -204,8 +257,15 @@ def fetch(doi: str, out_dir: Path, *, dry_run: bool = False) -> dict:
     doi = doi.strip().removeprefix("https://doi.org/").removeprefix("doi.org/")
     _log(f"==> {doi}")
 
-    pdf_url, meta = try_unpaywall(doi)
-    source = "unpaywall"
+    pdf_url = None
+    meta: dict = {}
+    source = "none"
+
+    if EMAIL:
+        pdf_url, meta = try_unpaywall(doi)
+        source = "unpaywall"
+    else:
+        _log("  [unpaywall] skipped (UNPAYWALL_EMAIL not set)")
 
     if not pdf_url:
         pdf_url, s2_meta, ext = try_semantic_scholar(doi)
@@ -251,7 +311,8 @@ def fetch(doi: str, out_dir: Path, *, dry_run: bool = False) -> dict:
         }
 
     _log(f"  [{source}] {pdf_url}")
-    if _download(pdf_url, dest):
+    dl_err = _download(pdf_url, dest)
+    if dl_err is None:
         _log(f"  saved → {dest}")
         return {
             "doi": doi,
@@ -262,6 +323,7 @@ def fetch(doi: str, out_dir: Path, *, dry_run: bool = False) -> dict:
             "meta": meta or {},
         }
 
+    retryable = dl_err in ("network_error", "size_exceeded")
     return {
         "doi": doi,
         "success": False,
@@ -269,7 +331,7 @@ def fetch(doi: str, out_dir: Path, *, dry_run: bool = False) -> dict:
         "pdf_url": pdf_url,
         "file": None,
         "meta": meta or {},
-        "error": {"code": "download_failed", "message": f"Download failed from {source}", "retryable": True},
+        "error": {"code": f"download_{dl_err}", "message": f"Download failed from {source}: {dl_err}", "retryable": retryable},
     }
 
 
@@ -281,8 +343,11 @@ EPILOG = """\
 exit codes:
   0  all DOIs resolved successfully
   1  runtime error (some DOIs failed, network issues)
-  2  auth error (UNPAYWALL_EMAIL not set)
   3  validation error (bad arguments)
+
+note:
+  If UNPAYWALL_EMAIL is not set, Unpaywall is skipped (warning on stderr).
+  The remaining sources (Semantic Scholar, arXiv, PMC, bioRxiv) still work.
 
 output:
   stdout emits one JSON object per invocation (use --format text for humans).
@@ -314,8 +379,7 @@ def main():
     _format = args.fmt
 
     if not EMAIL:
-        _emit(_err("auth_missing", "Set UNPAYWALL_EMAIL env var to your contact email", retryable=False, retry_after_auth=True))
-        sys.exit(EXIT_AUTH)
+        _log("warning: UNPAYWALL_EMAIL not set — Unpaywall source will be skipped")
 
     out_dir = Path(args.out)
     dois: list[str] = []
@@ -353,4 +417,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as e:
+        _emit(_err("internal_error", str(e), retryable=False))
+        sys.exit(EXIT_RUNTIME)

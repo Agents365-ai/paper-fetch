@@ -41,13 +41,13 @@ Works with all major AI coding agents that support the Agent Skills format:
 ## Prerequisites
 
 - **Python 3.8+** (standard library only, no extra packages)
-- **Unpaywall contact email** — set once as an environment variable:
+- **Unpaywall contact email** (optional but recommended) — set once:
 
 ```bash
 export UNPAYWALL_EMAIL=you@example.com
 ```
 
-Add it to `~/.zshrc` / `~/.bashrc` to persist. Unpaywall is free, has no account system, and only uses the email to contact you if your requests cause issues.
+Add it to `~/.zshrc` / `~/.bashrc` to persist. Without it, Unpaywall is skipped and the remaining 4 sources (Semantic Scholar, arXiv, PMC, bioRxiv/medRxiv) are still tried.
 
 ## Skill Installation
 
@@ -143,6 +143,18 @@ EOF
 python scripts/fetch.py --batch dois.txt --out ~/papers
 ```
 
+Dry-run (preview without downloading):
+
+```bash
+python scripts/fetch.py 10.1038/s41586-020-2649-2 --dry-run
+```
+
+Human-readable text output:
+
+```bash
+python scripts/fetch.py 10.1038/s41586-020-2649-2 --format text
+```
+
 Or just ask your agent naturally:
 
 > Download the AlphaFold2 paper PDF to my `~/papers` folder
@@ -175,9 +187,10 @@ Or just ask your agent naturally:
 ## Known Limitations
 
 - **Coverage depends on OA availability** — if a paper has no legal OA copy, this skill cannot get it. That is a feature, not a bug.
-- **Unpaywall email required** — the script exits with an error if `UNPAYWALL_EMAIL` is not set
 - **Some publisher redirects** return an HTML landing page instead of a PDF; the script validates the `%PDF` header and fails cleanly in that case
 - **No authentication** — institutional proxies (EZproxy / OpenAthens) are not supported in this version
+- **Host allowlist** — downloads are restricted to known OA provider domains; PDFs from unlisted hosts are blocked
+- **50 MB size limit** — per-PDF download cap to prevent runaway downloads
 
 ## License
 

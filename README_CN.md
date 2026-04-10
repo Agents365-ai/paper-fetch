@@ -39,13 +39,13 @@
 ## 环境要求
 
 - **Python 3.8+**（仅标准库）
-- **Unpaywall 联系邮箱**（一次性配置环境变量）：
+- **Unpaywall 联系邮箱**（可选但推荐）：
 
 ```bash
 export UNPAYWALL_EMAIL=you@example.com
 ```
 
-加入 `~/.zshrc` / `~/.bashrc` 持久化。Unpaywall 免费，无账号系统，邮箱仅在请求异常时联系你。
+加入 `~/.zshrc` / `~/.bashrc` 持久化。未设置时 Unpaywall 会被跳过，其余 4 个来源（Semantic Scholar、arXiv、PMC、bioRxiv/medRxiv）仍然可用。
 
 ## 安装
 
@@ -131,6 +131,18 @@ python scripts/fetch.py 10.1038/s41586-021-03819-2 --out ~/papers
 python scripts/fetch.py --batch dois.txt --out ~/papers
 ```
 
+预览模式（不下载）：
+
+```bash
+python scripts/fetch.py 10.1038/s41586-020-2649-2 --dry-run
+```
+
+人类可读文本输出：
+
+```bash
+python scripts/fetch.py 10.1038/s41586-020-2649-2 --format text
+```
+
 或者直接对 agent 说：
 
 > 帮我把 AlphaFold2 那篇论文下到 `~/papers`
@@ -162,9 +174,10 @@ python scripts/fetch.py --batch dois.txt --out ~/papers
 ## 已知限制
 
 - **覆盖率取决于 OA 可用性** — 没有合法 OA 版本的论文本 skill 无法获取，这是刻意设计
-- **必须设置 Unpaywall 邮箱**，否则脚本报错退出
 - **部分出版社重定向**返回 HTML 落地页而非 PDF，脚本会校验 `%PDF` 头并优雅失败
 - **不支持机构代理**（EZproxy / OpenAthens）
+- **域名白名单** — 下载限制在已知 OA 提供商域名内，未列出的主机会被拦截
+- **50 MB 大小限制** — 单个 PDF 下载上限，防止异常大文件
 
 ## 许可
 
