@@ -22,18 +22,95 @@ If only a title is given, resolve to a DOI first via Semantic Scholar `search_pa
 
 ## Usage
 
-Run the helper script:
-
 ```bash
-python scripts/fetch.py <DOI> [--out DIR]
+python scripts/fetch.py <DOI> [--out DIR] [--dry-run] [--format json|text]
 ```
 
-Default output directory: `./pdfs/`. Filenames: `{first_author}_{year}_{short_title}.pdf`.
+### Flags
 
-The script prints the source that succeeded (e.g. `[unpaywall] saved to pdfs/Smith_2023_attention.pdf`) or a structured failure with the metadata it did find.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `doi` | — | DOI to fetch (positional, e.g. `10.1038/s41586-020-2649-2`) |
+| `--batch FILE` | — | File with one DOI per line for bulk download |
+| `--out DIR` | `pdfs` | Output directory |
+| `--dry-run` | off | Resolve sources without downloading; preview the PDF URL and filename |
+| `--format` | `json` | Output format: `json` (for agents) or `text` (for humans) |
+
+### Output contract
+
+**stdout** emits a single JSON object (when `--format json`):
+
+Success:
+```json
+{
+  "ok": true,
+  "data": {
+    "results": [
+      {
+        "doi": "10.1038/s41586-020-2649-2",
+        "success": true,
+        "source": "unpaywall",
+        "pdf_url": "https://...",
+        "file": "pdfs/Author_2020_Title.pdf",
+        "meta": {"title": "...", "year": 2020, "author": "Smith"}
+      }
+    ],
+    "summary": {"total": 1, "succeeded": 1, "failed": 0}
+  }
+}
+```
+
+Failure:
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "auth_missing",
+    "message": "Set UNPAYWALL_EMAIL env var to your contact email",
+    "retryable": false,
+    "retry_after_auth": true
+  }
+}
+```
+
+**stderr** carries human-readable progress diagnostics (source attempts, download status).
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | All DOIs resolved successfully |
+| `1` | Runtime error (some DOIs failed, network issues) |
+| `2` | Auth error (`UNPAYWALL_EMAIL` not set) |
+| `3` | Validation error (bad arguments, missing input) |
+
+### Error codes in JSON
+
+| Code | Meaning | Retryable |
+|------|---------|-----------|
+| `auth_missing` | `UNPAYWALL_EMAIL` not set | No (set env var first) |
+| `validation_error` | Bad arguments or empty input | No |
+| `not_found` | No open-access PDF found | No |
+| `download_failed` | Source found but download failed | Yes |
+
+### Examples
+
+```bash
+# Single DOI (JSON output for agents)
+python scripts/fetch.py 10.1038/s41586-020-2649-2
+
+# Dry-run preview
+python scripts/fetch.py 10.1038/s41586-020-2649-2 --dry-run
+
+# Human-readable output
+python scripts/fetch.py 10.1038/s41586-020-2649-2 --format text
+
+# Batch download
+python scripts/fetch.py --batch dois.txt --out ./papers
+```
 
 ## Notes
 
-- Unpaywall requires a contact email in every request. Set it once: `export UNPAYWALL_EMAIL=you@example.com` (e.g. in `~/.zshrc`). The script exits with an error if it's not set.
+- Unpaywall requires a contact email in every request. Set it once: `export UNPAYWALL_EMAIL=you@example.com` (e.g. in `~/.zshrc`). The script exits with code 2 if it's not set.
 - Never attempts to bypass paywalls. If no OA copy exists, the skill reports failure — do not suggest Sci-Hub or similar.
-- For bulk jobs, pass a file of DOIs: `python scripts/fetch.py --batch dois.txt`.
+- Default output directory: `./pdfs/`. Filenames: `{first_author}_{year}_{short_title}.pdf`.

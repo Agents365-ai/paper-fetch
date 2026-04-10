@@ -3,6 +3,12 @@
 
 Resolution order: Unpaywall -> Semantic Scholar openAccessPdf ->
 arXiv -> PMC OA -> bioRxiv/medRxiv.
+
+Exit codes:
+  0  success (all DOIs resolved)
+  1  runtime error (some DOIs failed, network issues)
+  2  auth error (missing UNPAYWALL_EMAIL)
+  3  validation error (bad arguments)
 """
 from __future__ import annotations
 
@@ -16,9 +22,68 @@ from pathlib import Path
 
 import os
 
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
 EMAIL = os.environ.get("UNPAYWALL_EMAIL", "").strip()
 UA = f"paper-fetch/0.1 (mailto:{EMAIL or 'anonymous'})"
 TIMEOUT = 30
+
+EXIT_SUCCESS = 0
+EXIT_RUNTIME = 1
+EXIT_AUTH = 2
+EXIT_VALIDATION = 3
+
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
+
+_format = "json"  # set by main()
+
+
+def _log(msg: str) -> None:
+    """Human-readable diagnostic → stderr only."""
+    print(msg, file=sys.stderr)
+
+
+def _emit(obj: dict) -> None:
+    """Structured output → stdout as JSON or human-readable text."""
+    if _format == "json":
+        print(json.dumps(obj, ensure_ascii=False))
+    else:
+        _emit_text(obj)
+
+
+def _emit_text(obj: dict) -> None:
+    """Render a result envelope as human-readable text on stdout."""
+    if obj.get("ok"):
+        data = obj.get("data", {})
+        results = data.get("results", [data] if "doi" in data else [])
+        for r in results:
+            status = "dry-run" if r.get("dry_run") else ("saved" if r.get("file") else "failed")
+            print(f"[{r.get('source', '?')}] {r.get('doi', '?')} → {r.get('file') or r.get('pdf_url', '?')}  ({status})")
+        summary = data.get("summary")
+        if summary:
+            print(f"\n{summary['succeeded']}/{summary['total']} succeeded")
+    else:
+        err = obj.get("error", {})
+        print(f"error: [{err.get('code', '?')}] {err.get('message', '?')}")
+
+
+def _ok(data: dict) -> dict:
+    return {"ok": True, "data": data}
+
+
+def _err(code: str, message: str, *, retryable: bool = False, **ctx) -> dict:
+    e = {"code": code, "message": message, "retryable": retryable}
+    e.update(ctx)
+    return {"ok": False, "error": e}
+
+
+# ---------------------------------------------------------------------------
+# HTTP helpers
+# ---------------------------------------------------------------------------
 
 
 def _get(url: str, accept: str = "application/json") -> bytes:
@@ -35,14 +100,19 @@ def _download(url: str, dest: Path) -> bool:
     try:
         data = _get(url, accept="application/pdf")
     except Exception as e:
-        print(f"  download failed: {e}", file=sys.stderr)
+        _log(f"  download failed: {e}")
         return False
     if not data[:5].startswith(b"%PDF"):
-        print("  response was not a PDF", file=sys.stderr)
+        _log("  response was not a PDF")
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Filename helpers
+# ---------------------------------------------------------------------------
 
 
 def _slug(s: str, n: int = 40) -> str:
@@ -57,12 +127,17 @@ def _filename(meta: dict) -> str:
     return f"{author}_{year}_{title}.pdf"
 
 
+# ---------------------------------------------------------------------------
+# Source resolvers
+# ---------------------------------------------------------------------------
+
+
 def try_unpaywall(doi: str) -> tuple[str | None, dict]:
     url = f"https://api.unpaywall.org/v2/{urllib.parse.quote(doi)}?email={EMAIL}"
     try:
         d = _get_json(url)
     except Exception as e:
-        print(f"[unpaywall] error: {e}", file=sys.stderr)
+        _log(f"[unpaywall] error: {e}")
         return None, {}
     meta = {
         "title": d.get("title"),
@@ -81,7 +156,7 @@ def try_semantic_scholar(doi: str) -> tuple[str | None, dict, dict]:
     try:
         d = _get_json(url)
     except Exception as e:
-        print(f"[s2] error: {e}", file=sys.stderr)
+        _log(f"[s2] error: {e}")
         return None, {}, {}
     meta = {
         "title": d.get("title"),
@@ -116,16 +191,27 @@ def try_biorxiv(doi: str) -> str | None:
     return None
 
 
-def fetch(doi: str, out_dir: Path) -> bool:
+# ---------------------------------------------------------------------------
+# Core fetch logic
+# ---------------------------------------------------------------------------
+
+
+def fetch(doi: str, out_dir: Path, *, dry_run: bool = False) -> dict:
+    """Resolve and optionally download a single DOI.
+
+    Returns a structured result dict (not an envelope).
+    """
     doi = doi.strip().removeprefix("https://doi.org/").removeprefix("doi.org/")
-    print(f"==> {doi}")
+    _log(f"==> {doi}")
 
     pdf_url, meta = try_unpaywall(doi)
     source = "unpaywall"
 
     if not pdf_url:
         pdf_url, s2_meta, ext = try_semantic_scholar(doi)
-        meta = meta or s2_meta
+        for k, v in s2_meta.items():
+            if v and not meta.get(k):
+                meta[k] = v
         source = "semantic_scholar"
         if not pdf_url and ext.get("ArXiv"):
             pdf_url, source = try_arxiv(ext["ArXiv"]), "arxiv"
@@ -138,39 +224,132 @@ def fetch(doi: str, out_dir: Path) -> bool:
             source = "biorxiv"
 
     if not pdf_url:
-        print(f"  no OA PDF found. metadata: {meta}", file=sys.stderr)
-        return False
+        _log(f"  no OA PDF found for {doi}")
+        return {
+            "doi": doi,
+            "success": False,
+            "source": None,
+            "pdf_url": None,
+            "file": None,
+            "meta": meta or {},
+            "error": {"code": "not_found", "message": "No open-access PDF found", "retryable": False},
+        }
 
-    dest = out_dir / _filename(meta or {"title": doi})
-    print(f"  [{source}] {pdf_url}")
+    fname = _filename(meta or {"title": doi})
+    dest = out_dir / fname
+
+    if dry_run:
+        _log(f"  [dry-run] [{source}] {pdf_url} → {dest}")
+        return {
+            "doi": doi,
+            "success": True,
+            "source": source,
+            "pdf_url": pdf_url,
+            "file": str(dest),
+            "meta": meta or {},
+            "dry_run": True,
+        }
+
+    _log(f"  [{source}] {pdf_url}")
     if _download(pdf_url, dest):
-        print(f"  saved -> {dest}")
-        return True
-    return False
+        _log(f"  saved → {dest}")
+        return {
+            "doi": doi,
+            "success": True,
+            "source": source,
+            "pdf_url": pdf_url,
+            "file": str(dest),
+            "meta": meta or {},
+        }
+
+    return {
+        "doi": doi,
+        "success": False,
+        "source": source,
+        "pdf_url": pdf_url,
+        "file": None,
+        "meta": meta or {},
+        "error": {"code": "download_failed", "message": f"Download failed from {source}", "retryable": True},
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+EPILOG = """\
+exit codes:
+  0  all DOIs resolved successfully
+  1  runtime error (some DOIs failed, network issues)
+  2  auth error (UNPAYWALL_EMAIL not set)
+  3  validation error (bad arguments)
+
+output:
+  stdout emits one JSON object per invocation (use --format text for humans).
+  stderr carries human-readable progress diagnostics.
+
+examples:
+  %(prog)s 10.1038/s41586-020-2649-2
+  %(prog)s 10.1038/s41586-020-2649-2 --dry-run
+  %(prog)s --batch dois.txt --out ./papers --format text
+"""
 
 
 def main():
-    if not EMAIL:
-        print("error: set UNPAYWALL_EMAIL env var to your contact email", file=sys.stderr)
-        sys.exit(2)
-    ap = argparse.ArgumentParser()
-    ap.add_argument("doi", nargs="?")
-    ap.add_argument("--batch", help="file with one DOI per line")
-    ap.add_argument("--out", default="pdfs")
+    global _format
+
+    ap = argparse.ArgumentParser(
+        prog="paper-fetch",
+        description="Fetch legal open-access PDFs by DOI via Unpaywall, Semantic Scholar, arXiv, PMC, and bioRxiv/medRxiv.",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("doi", nargs="?", help="DOI to fetch (e.g. 10.1038/s41586-020-2649-2)")
+    ap.add_argument("--batch", metavar="FILE", help="file with one DOI per line for bulk download")
+    ap.add_argument("--out", default="pdfs", metavar="DIR", help="output directory (default: pdfs)")
+    ap.add_argument("--dry-run", action="store_true", help="resolve sources without downloading; preview the PDF URL and filename")
+    ap.add_argument("--format", choices=["json", "text"], default="json", dest="fmt", help="output format (default: json). json for agents, text for humans")
     args = ap.parse_args()
 
+    _format = args.fmt
+
+    if not EMAIL:
+        _emit(_err("auth_missing", "Set UNPAYWALL_EMAIL env var to your contact email", retryable=False, retry_after_auth=True))
+        sys.exit(EXIT_AUTH)
+
     out_dir = Path(args.out)
-    dois = []
+    dois: list[str] = []
     if args.batch:
-        dois = [l.strip() for l in Path(args.batch).read_text().splitlines() if l.strip()]
+        batch_path = Path(args.batch)
+        if not batch_path.exists():
+            _emit(_err("validation_error", f"Batch file not found: {args.batch}", retryable=False, field="batch"))
+            sys.exit(EXIT_VALIDATION)
+        dois = [l.strip() for l in batch_path.read_text().splitlines() if l.strip()]
     elif args.doi:
         dois = [args.doi]
     else:
-        ap.error("provide a DOI or --batch file")
+        _emit(_err("validation_error", "Provide a DOI or --batch file", retryable=False))
+        sys.exit(EXIT_VALIDATION)
 
-    ok = sum(fetch(d, out_dir) for d in dois)
-    print(f"\n{ok}/{len(dois)} succeeded")
-    sys.exit(0 if ok == len(dois) else 1)
+    if not dois:
+        _emit(_err("validation_error", "No DOIs found in input", retryable=False))
+        sys.exit(EXIT_VALIDATION)
+
+    results = [fetch(d, out_dir, dry_run=args.dry_run) for d in dois]
+    succeeded = sum(1 for r in results if r["success"])
+    total = len(results)
+
+    output = _ok({
+        "results": results,
+        "summary": {
+            "total": total,
+            "succeeded": succeeded,
+            "failed": total - succeeded,
+        },
+    })
+
+    _emit(output)
+    sys.exit(EXIT_SUCCESS if succeeded == total else EXIT_RUNTIME)
 
 
 if __name__ == "__main__":
