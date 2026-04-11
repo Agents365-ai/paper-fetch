@@ -166,7 +166,9 @@ When `--format json`, stderr emits one JSON object per line for liveness:
 {"event": "download_ok", "request_id": "req_...", "elapsed_ms": 4120, "doi": "...", "file": "..."}
 ```
 
-Event types: `start`, `source_try`, `source_hit`, `source_miss`, `source_skip`, `download_ok`, `download_error`, `download_skip`, `dry_run`, `not_found`, `update_check_spawned`. All events share `request_id` and `elapsed_ms`, letting an orchestrator correlate progress across stderr and the final stdout envelope.
+Event types: `start`, `source_try`, `source_hit`, `source_miss`, `source_skip`, `source_enrich`, `source_enrich_failed`, `download_ok`, `download_error`, `download_skip`, `dry_run`, `not_found`, `update_check_spawned`. All events share `request_id` and `elapsed_ms`, letting an orchestrator correlate progress across stderr and the final stdout envelope.
+
+`source_enrich` fires when Semantic Scholar is called purely to backfill missing `author` / `title` after another source already provided the PDF URL; its `fields` array lists exactly which fields were filled in. `source_enrich_failed` fires when that enrichment call fails — the Unpaywall PDF URL is still used and the filename falls back to `unknown_<year>_…`.
 
 When `--format text`, stderr emits human-readable prose.
 

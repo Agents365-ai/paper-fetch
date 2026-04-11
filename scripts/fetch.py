@@ -39,7 +39,7 @@ from pathlib import Path
 # Versioning
 # ---------------------------------------------------------------------------
 
-CLI_VERSION = "0.3.0"
+CLI_VERSION = "0.4.0"
 SCHEMA_VERSION = "1.1.0"
 
 # ---------------------------------------------------------------------------
@@ -419,6 +419,10 @@ def fetch(
                 enriched_fields.append(k)
         if enriched_fields:
             _progress("source_enrich", doi=doi, source="semantic_scholar", fields=enriched_fields)
+        elif not s2_meta:
+            # S2 unreachable during enrichment. The Unpaywall PDF URL is still
+            # valid; the filename will just fall back to "unknown_<year>_…".
+            _progress("source_enrich_failed", doi=doi, source="semantic_scholar", reason="s2_unavailable")
 
     if not pdf_url:
         _progress("source_try", doi=doi, source="semantic_scholar")
