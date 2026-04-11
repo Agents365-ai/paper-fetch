@@ -382,7 +382,11 @@ def fetch(
     Returns a structured per-item result (not an envelope). Guaranteed keys:
       doi, success, source, pdf_url, file, meta, sources_tried, error?
     """
-    doi = doi.strip().removeprefix("https://doi.org/").removeprefix("doi.org/")
+    doi = doi.strip()
+    # str.removeprefix is Python 3.9+; README advertises 3.8+.
+    for _prefix in ("https://doi.org/", "doi.org/"):
+        if doi.startswith(_prefix):
+            doi = doi[len(_prefix):]
     _progress("start", doi=doi)
 
     sources_tried: list[str] = []
