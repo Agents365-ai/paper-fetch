@@ -149,3 +149,22 @@ python scripts/fetch.py 10.1038/s41586-020-2649-2
 - Downloads are restricted to a host allowlist of known OA providers, with a 50 MB size limit per PDF.
 - Never attempts to bypass paywalls. If no OA copy exists, the skill reports failure — do not suggest Sci-Hub or similar.
 - Default output directory: `./pdfs/`. Filenames: `{first_author}_{year}_{short_title}.pdf`.
+
+## Auto-update
+
+When installed via `git clone`, the skill keeps itself in sync with upstream automatically. On each invocation, `fetch.py` spawns a **detached background `git pull --ff-only`** in the skill directory:
+
+- **Non-blocking** — the current invocation is not delayed; the pull runs in a new session and is fully detached
+- **Silent** — all output goes to `/dev/null`, JSON contract on stdout is never polluted
+- **Throttled** — at most once every 24 hours (stamped via `.git/.paper-fetch-last-update`)
+- **Safe** — `--ff-only` refuses to merge if you have local edits; conflicts never happen
+- **Convergence** — updates apply on the **next** invocation, not the current one (because the pull is backgrounded)
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PAPER_FETCH_NO_AUTO_UPDATE` | unset | Set to any value to completely disable auto-update |
+| `PAPER_FETCH_UPDATE_INTERVAL` | `86400` | Cooldown in seconds between update attempts |
+
+Auto-update is a no-op when the skill is not a git checkout (e.g. tarball install), when `git` is unavailable, or when the cooldown stamp is fresh. Force an immediate check with `rm <skill_dir>/.git/.paper-fetch-last-update`.

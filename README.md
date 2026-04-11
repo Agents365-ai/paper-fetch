@@ -10,6 +10,7 @@
 - **Auto-named output** — `{first_author}_{year}_{short_title}.pdf`
 - **Batch mode** — pass a file of DOIs with `--batch`
 - **Never touches Sci-Hub or any paywall-bypass service** — if no OA copy exists, reports failure with metadata so you can go through ILL
+- **Self-updating** — when installed via `git clone`, each invocation spawns a detached background `git pull --ff-only` (throttled to once per 24h). Zero user action required. Disable with `export PAPER_FETCH_NO_AUTO_UPDATE=1`.
 
 ## Discipline Coverage
 
