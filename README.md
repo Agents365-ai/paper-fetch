@@ -8,7 +8,9 @@
 - **5-source fallback chain**: Unpaywall → Semantic Scholar `openAccessPdf` → arXiv → PubMed Central OA → bioRxiv/medRxiv
 - **Zero dependencies** — pure Python standard library, no `pip install` needed
 - **Auto-named output** — `{first_author}_{year}_{short_title}.pdf`
-- **Batch mode** — pass a file of DOIs with `--batch`
+- **Batch mode** — pass a file of DOIs with `--batch`, or pipe them in with `--batch -`
+- **Agent-native** — stable JSON envelope on stdout, NDJSON progress on stderr, machine-readable `schema` subcommand, TTY-aware format default, idempotent retries via `--idempotency-key`, typed exit codes (`0`/`1`/`3`/`4`), partial-success batches with `next` retry hints
+- **Safely retriable** — re-running skips already-downloaded files; `--idempotency-key` replays the exact envelope without any network I/O
 - **Never touches Sci-Hub or any paywall-bypass service** — if no OA copy exists, reports failure with metadata so you can go through ILL
 - **Self-updating** — when installed via `git clone`, each invocation spawns a detached background `git pull --ff-only` (throttled to once per 24h). Zero user action required. Disable with `export PAPER_FETCH_NO_AUTO_UPDATE=1`.
 
@@ -48,8 +50,12 @@ Works with all major AI coding agents that support the Agent Skills format:
 | Resolve DOI to PDF | Ad-hoc web search | Deterministic 5-source chain |
 | Unpaywall integration | No | Yes — highest OA coverage |
 | arXiv / PMC / bioRxiv fallback | Manual | Automatic |
-| Batch download | No | Yes — `--batch dois.txt` |
+| Batch download | No | Yes — `--batch dois.txt` or `--batch -` (stdin) |
 | Consistent filenames | No | Yes — `author_year_title.pdf` |
+| Machine-readable schema | No | Yes — `fetch.py schema` |
+| Structured output | No | Stable JSON envelope + NDJSON progress |
+| Idempotent retries | No | `--idempotency-key` replays cached envelope |
+| Typed exit codes | No | `0`/`1`/`3`/`4` — orchestrator can route failures |
 | Legal-only guarantee | None | Hard refuses paywall bypass |
 | Dependencies | Varies | Python stdlib only |
 
@@ -168,6 +174,31 @@ Human-readable text output:
 
 ```bash
 python scripts/fetch.py 10.1038/s41586-020-2649-2 --format text
+```
+
+Pipe DOIs from another tool:
+
+```bash
+echo 10.1038/s41586-021-03819-2 | python scripts/fetch.py --batch -
+```
+
+Safely retriable batch (replay cached envelope on retry):
+
+```bash
+python scripts/fetch.py --batch dois.txt --out ~/papers \
+    --idempotency-key monday-review-batch
+```
+
+Machine-readable self-description (for agents):
+
+```bash
+python scripts/fetch.py schema --pretty
+```
+
+Streaming NDJSON (one result per line as each DOI resolves):
+
+```bash
+python scripts/fetch.py --batch dois.txt --stream
 ```
 
 Or just ask your agent naturally:
