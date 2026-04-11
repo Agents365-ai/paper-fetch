@@ -11,6 +11,20 @@
 - **Batch mode** — pass a file of DOIs with `--batch`
 - **Never touches Sci-Hub or any paywall-bypass service** — if no OA copy exists, reports failure with metadata so you can go through ILL
 
+## Discipline Coverage
+
+**The skill is discipline-agnostic** — it works for any field, not just life sciences or computer science. Coverage depends on whether the paper has a legal OA version, not on its subject area.
+
+| Source | Discipline scope |
+|---|---|
+| **Unpaywall** | ✅ All disciplines (covers every Crossref DOI — humanities, social sciences, physics, chemistry, economics, etc.) |
+| **Semantic Scholar** | ✅ All disciplines (cross-domain academic graph) |
+| **arXiv** | Physics, math, CS, statistics, quantitative finance, economics, EE |
+| **PubMed Central** | Biomedical only |
+| **bioRxiv / medRxiv** | Biology / medicine preprints only |
+
+In practice, **Unpaywall + Semantic Scholar alone cover OA papers in chemistry, materials, economics, psychology, humanities, and every other field** via institutional repositories, SSRN, RePEc, and publisher-hosted OA copies. arXiv/PMC/bioRxiv are additional fallbacks for their specific domains. If no legal OA copy exists anywhere, the skill reports failure honestly — it will **never** bypass paywalls regardless of discipline.
+
 ## Multi-Platform Support
 
 Works with all major AI coding agents that support the Agent Skills format:
