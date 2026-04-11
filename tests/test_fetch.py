@@ -351,5 +351,230 @@ class TestCliIntegration(unittest.TestCase):
             self.assertNotEqual(envelope["meta"]["request_id"], "req_seed")
 
 
+# ---------------------------------------------------------------------------
+# Resolution chain (mock-based — no network)
+# ---------------------------------------------------------------------------
+
+
+from unittest.mock import patch  # noqa: E402 — keep imports grouped by section
+
+
+class TestFetchLogic(unittest.TestCase):
+    """Exercise fetch.fetch() by patching the source resolvers.
+
+    Every test here runs with EMAIL='test@example.com' (so Unpaywall is
+    tried) unless explicitly overridden, and with _download mocked to
+    always succeed so we can assert on flow rather than filesystem state.
+    """
+
+    def setUp(self):
+        # Seed output state used by _progress / _meta.
+        fetch._format = "json"
+        fetch._request_id = "req_mock"
+        fetch._started_monotonic = 0.0
+        self._email_patch = patch.object(fetch, "EMAIL", "test@example.com")
+        self._email_patch.start()
+        # Silence stderr progress events during tests.
+        self._progress_patch = patch.object(fetch, "_progress", lambda *a, **k: None)
+        self._progress_patch.start()
+
+    def tearDown(self):
+        self._email_patch.stop()
+        self._progress_patch.stop()
+
+    # -- helpers ---------------------------------------------------------
+
+    def _fetch(self, doi, **kwargs):
+        out_dir = kwargs.pop("out_dir", Path("/tmp/pf-mock-out"))
+        defaults = dict(dry_run=True, overwrite=False, timeout=5)
+        defaults.update(kwargs)
+        return fetch.fetch(doi, out_dir, **defaults)
+
+    # -- resolution chain -----------------------------------------------
+
+    def test_unpaywall_hit_short_circuits(self):
+        with patch.object(fetch, "try_unpaywall", return_value=(
+            "https://www.nature.com/articles/x.pdf",
+            {"title": "Paper", "year": 2024, "author": "Smith"},
+        )) as up, patch.object(fetch, "try_semantic_scholar") as s2:
+            r = self._fetch("10.1038/x")
+        up.assert_called_once()
+        # Full meta from Unpaywall → no enrichment call to S2.
+        s2.assert_not_called()
+        self.assertTrue(r["success"])
+        self.assertEqual(r["source"], "unpaywall")
+        self.assertEqual(r["sources_tried"], ["unpaywall"])
+
+    def test_unpaywall_hit_with_missing_author_triggers_enrichment(self):
+        with patch.object(fetch, "try_unpaywall", return_value=(
+            "https://www.nature.com/articles/x.pdf",
+            {"title": "Paper", "year": 2024, "author": None},
+        )), patch.object(fetch, "try_semantic_scholar", return_value=(
+            None,
+            {"title": "Paper", "year": 2024, "author": "Jumper"},
+            {},
+        )) as s2:
+            r = self._fetch("10.1038/x")
+        # Enrichment path was taken.
+        s2.assert_called_once()
+        self.assertEqual(r["meta"]["author"], "Jumper")
+        # Filename should use the enriched author.
+        self.assertIn("Jumper_", r["file"])
+        self.assertIn("semantic_scholar", r["sources_tried"])
+        # Source stays as unpaywall — enrichment does not override the PDF URL.
+        self.assertEqual(r["source"], "unpaywall")
+
+    def test_unpaywall_miss_falls_to_semantic_scholar(self):
+        with patch.object(fetch, "try_unpaywall", return_value=(None, {})), \
+             patch.object(fetch, "try_semantic_scholar", return_value=(
+                 "https://s2.fake/paper.pdf",
+                 {"title": "T", "year": 2020, "author": "Doe"},
+                 {},
+             )):
+            r = self._fetch("10.1/x")
+        self.assertTrue(r["success"])
+        self.assertEqual(r["source"], "semantic_scholar")
+        self.assertEqual(r["sources_tried"], ["unpaywall", "semantic_scholar"])
+
+    def test_s2_externalid_arxiv(self):
+        with patch.object(fetch, "try_unpaywall", return_value=(None, {})), \
+             patch.object(fetch, "try_semantic_scholar", return_value=(
+                 None,
+                 {"title": "T", "year": 2020, "author": "Doe"},
+                 {"ArXiv": "2103.00001"},
+             )):
+            r = self._fetch("10.1/x")
+        self.assertTrue(r["success"])
+        self.assertEqual(r["source"], "arxiv")
+        self.assertIn("arxiv", r["sources_tried"])
+        self.assertEqual(r["pdf_url"], "https://arxiv.org/pdf/2103.00001.pdf")
+
+    def test_s2_externalid_pmc(self):
+        with patch.object(fetch, "try_unpaywall", return_value=(None, {})), \
+             patch.object(fetch, "try_semantic_scholar", return_value=(
+                 None,
+                 {"title": "T", "year": 2020, "author": "Doe"},
+                 {"PubMedCentral": "PMC1234567"},
+             )):
+            r = self._fetch("10.1/x")
+        self.assertTrue(r["success"])
+        self.assertEqual(r["source"], "pmc")
+        self.assertIn("PMC1234567", r["pdf_url"])
+
+    def test_biorxiv_doi_prefix(self):
+        with patch.object(fetch, "try_unpaywall", return_value=(None, {})), \
+             patch.object(fetch, "try_semantic_scholar", return_value=(None, {}, {})), \
+             patch.object(fetch, "try_biorxiv", return_value="https://www.biorxiv.org/x.pdf"):
+            r = self._fetch("10.1101/2023.01.01.522400")
+        self.assertTrue(r["success"])
+        self.assertEqual(r["source"], "biorxiv")
+        self.assertIn("biorxiv", r["sources_tried"])
+
+    def test_non_biorxiv_doi_does_not_try_biorxiv(self):
+        with patch.object(fetch, "try_unpaywall", return_value=(None, {})), \
+             patch.object(fetch, "try_semantic_scholar", return_value=(None, {}, {})), \
+             patch.object(fetch, "try_biorxiv") as biorxiv:
+            r = self._fetch("10.1038/x")
+        biorxiv.assert_not_called()
+        self.assertFalse(r["success"])
+        self.assertNotIn("biorxiv", r["sources_tried"])
+
+    def test_all_sources_miss_returns_not_found(self):
+        with patch.object(fetch, "try_unpaywall", return_value=(None, {})), \
+             patch.object(fetch, "try_semantic_scholar", return_value=(None, {}, {})):
+            r = self._fetch("10.1/nope")
+        self.assertFalse(r["success"])
+        self.assertIsNone(r["source"])
+        self.assertEqual(r["error"]["code"], "not_found")
+        # Contract: not_found is retryable with retry_after_hours.
+        self.assertTrue(r["error"]["retryable"])
+        self.assertEqual(r["error"]["retry_after_hours"], 168)
+
+    def test_email_unset_skips_unpaywall(self):
+        with patch.object(fetch, "EMAIL", ""), \
+             patch.object(fetch, "try_unpaywall") as up, \
+             patch.object(fetch, "try_semantic_scholar", return_value=(
+                 "https://s2.fake/x.pdf",
+                 {"title": "T", "year": 2020, "author": "Doe"},
+                 {},
+             )):
+            r = self._fetch("10.1/x")
+        up.assert_not_called()
+        self.assertTrue(r["success"])
+        self.assertNotIn("unpaywall", r["sources_tried"])
+
+    # -- post-resolution flow -------------------------------------------
+
+    def test_dry_run_does_not_download(self):
+        with patch.object(fetch, "try_unpaywall", return_value=(
+            "https://arxiv.org/pdf/x.pdf",
+            {"title": "T", "year": 2024, "author": "Smith"},
+        )), patch.object(fetch, "_download") as dl:
+            r = self._fetch("10.1/x", dry_run=True)
+        dl.assert_not_called()
+        self.assertTrue(r["success"])
+        self.assertTrue(r.get("dry_run"))
+
+    def test_skip_if_exists(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            # Seed the deterministic destination filename.
+            existing = out / "Smith_2024_Paper.pdf"
+            existing.write_bytes(b"%PDF-1.4 existing")
+            with patch.object(fetch, "try_unpaywall", return_value=(
+                "https://arxiv.org/pdf/x.pdf",
+                {"title": "Paper", "year": 2024, "author": "Smith"},
+            )), patch.object(fetch, "_download") as dl:
+                r = self._fetch("10.1/x", out_dir=out, dry_run=False, overwrite=False)
+            dl.assert_not_called()
+            self.assertTrue(r["success"])
+            self.assertTrue(r["skipped"])
+            self.assertEqual(r["skip_reason"], "file_exists")
+
+    def test_overwrite_forces_download(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            existing = out / "Smith_2024_Paper.pdf"
+            existing.write_bytes(b"%PDF-1.4 existing")
+            with patch.object(fetch, "try_unpaywall", return_value=(
+                "https://arxiv.org/pdf/x.pdf",
+                {"title": "Paper", "year": 2024, "author": "Smith"},
+            )), patch.object(fetch, "_download", return_value=None) as dl:
+                r = self._fetch("10.1/x", out_dir=out, dry_run=False, overwrite=True)
+            dl.assert_called_once()
+            self.assertTrue(r["success"])
+            self.assertFalse(r.get("skipped", False))
+
+    def test_download_network_error_is_retryable(self):
+        with patch.object(fetch, "try_unpaywall", return_value=(
+            "https://arxiv.org/pdf/x.pdf",
+            {"title": "T", "year": 2024, "author": "Smith"},
+        )), patch.object(fetch, "_download", return_value="network_error"):
+            r = self._fetch("10.1/x", dry_run=False)
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"]["code"], "download_network_error")
+        self.assertTrue(r["error"]["retryable"])
+
+    def test_download_not_a_pdf_is_not_retryable(self):
+        with patch.object(fetch, "try_unpaywall", return_value=(
+            "https://arxiv.org/pdf/x.pdf",
+            {"title": "T", "year": 2024, "author": "Smith"},
+        )), patch.object(fetch, "_download", return_value="not_a_pdf"):
+            r = self._fetch("10.1/x", dry_run=False)
+        self.assertFalse(r["success"])
+        self.assertEqual(r["error"]["code"], "download_not_a_pdf")
+        self.assertFalse(r["error"]["retryable"])
+
+    def test_doi_url_prefix_is_stripped(self):
+        with patch.object(fetch, "try_unpaywall") as up:
+            up.return_value = (None, {})
+            with patch.object(fetch, "try_semantic_scholar", return_value=(None, {}, {})):
+                r = self._fetch("https://doi.org/10.1/x")
+        # Verify the DOI was normalized before the call.
+        self.assertEqual(r["doi"], "10.1/x")
+        called_doi = up.call_args[0][0]
+        self.assertEqual(called_doi, "10.1/x")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
