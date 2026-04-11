@@ -402,6 +402,24 @@ def fetch(
     else:
         _progress("source_skip", doi=doi, source="unpaywall", reason="UNPAYWALL_EMAIL not set")
 
+    # Metadata enrichment: Unpaywall sometimes returns a PDF URL without
+    # full z_authors or title; enrich from Semantic Scholar so the
+    # derived filename uses the real first author / title instead of
+    # the "unknown_<year>_paper.pdf" fallback. Does not override the
+    # Unpaywall PDF URL.
+    if pdf_url and (not meta.get("author") or not meta.get("title")):
+        _progress("source_try", doi=doi, source="semantic_scholar", reason="metadata_enrichment")
+        if "semantic_scholar" not in sources_tried:
+            sources_tried.append("semantic_scholar")
+        _, s2_meta, _ = try_semantic_scholar(doi, timeout=timeout)
+        enriched_fields = []
+        for k, v in s2_meta.items():
+            if v and not meta.get(k):
+                meta[k] = v
+                enriched_fields.append(k)
+        if enriched_fields:
+            _progress("source_enrich", doi=doi, source="semantic_scholar", fields=enriched_fields)
+
     if not pdf_url:
         _progress("source_try", doi=doi, source="semantic_scholar")
         sources_tried.append("semantic_scholar")
