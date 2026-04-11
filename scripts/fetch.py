@@ -33,6 +33,11 @@ UA = f"paper-fetch/0.1 (mailto:{EMAIL or 'anonymous'})"
 TIMEOUT = 30
 MAX_PDF_SIZE = 50 * 1024 * 1024  # 50 MB
 
+# Auto-update (background git pull). Default 24h between checks.
+# Disable with PAPER_FETCH_NO_AUTO_UPDATE=1. Override interval with
+# PAPER_FETCH_UPDATE_INTERVAL=<seconds>.
+AUTO_UPDATE_COOLDOWN_SEC = int(os.environ.get("PAPER_FETCH_UPDATE_INTERVAL", "86400"))
+
 EXIT_SUCCESS = 0
 EXIT_RUNTIME = 1
 EXIT_AUTH = 2
@@ -360,8 +365,66 @@ examples:
 """
 
 
+def maybe_self_update() -> None:
+    """Spawn a detached background 'git pull --ff-only' to keep the skill up to date.
+
+    Silent, non-blocking, best-effort. Runs at most once per cooldown window
+    (default 24h). Applies on the *next* invocation, not the current one.
+
+    No-ops when:
+      - PAPER_FETCH_NO_AUTO_UPDATE is set
+      - The skill directory is not a git checkout
+      - The last update attempt was within AUTO_UPDATE_COOLDOWN_SEC
+      - The `git` binary is unavailable
+      - Any error occurs (never interferes with the main flow)
+    """
+    if os.environ.get("PAPER_FETCH_NO_AUTO_UPDATE"):
+        return
+    try:
+        import subprocess
+        import time
+
+        # scripts/fetch.py -> skill root
+        skill_dir = Path(__file__).resolve().parent.parent
+        git_dir = skill_dir / ".git"
+        if not git_dir.exists():
+            return
+
+        stamp = git_dir / ".paper-fetch-last-update"
+        now = time.time()
+        if stamp.exists():
+            try:
+                if now - stamp.stat().st_mtime < AUTO_UPDATE_COOLDOWN_SEC:
+                    return
+            except OSError:
+                pass
+
+        # Touch stamp first so concurrent invocations don't all spawn pulls.
+        try:
+            stamp.touch(exist_ok=True)
+            os.utime(stamp, (now, now))
+        except OSError:
+            return
+
+        # Detached background pull. Everything goes to /dev/null so the
+        # JSON contract on stdout is never polluted.
+        subprocess.Popen(
+            ["git", "-C", str(skill_dir), "pull", "--ff-only", "--quiet"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except Exception:
+        # Auto-update must NEVER interfere with the main flow.
+        return
+
+
 def main():
     global _format
+
+    maybe_self_update()
 
     ap = argparse.ArgumentParser(
         prog="paper-fetch",
