@@ -8,7 +8,9 @@
 - **5 源回退链**：Unpaywall → Semantic Scholar `openAccessPdf` → arXiv → PubMed Central OA → bioRxiv/medRxiv
 - **零依赖** — 纯 Python 标准库，无需 `pip install`
 - **自动命名**：`{第一作者}_{年份}_{简短标题}.pdf`
-- **批量模式**：`--batch` 传入 DOI 列表文件
+- **批量模式**：`--batch` 传入 DOI 列表文件，或用 `--batch -` 从 stdin 管道读入
+- **Agent 原生** — stdout 输出稳定的 JSON 信封，stderr 输出 NDJSON 进度事件，提供机器可读的 `schema` 子命令，`--format` 自动识别 TTY，通过 `--idempotency-key` 支持幂等重试，退出码分类（`0`/`1`/`3`/`4`），批量部分失败时输出带 `next` 重试提示的 `ok: "partial"` 信封
+- **安全可重试** — 重复运行会跳过已下载文件；`--idempotency-key` 直接复用原信封，无任何网络 I/O
 - **不使用 Sci-Hub 或任何绕过付费墙的服务** — 没有 OA 版本时会报告失败并输出元数据，便于走馆际互借
 - **自动更新** — 通过 `git clone` 安装时，每次调用会后台 detach 一个 `git pull --ff-only`（24 小时内至多一次）。无需用户任何操作。禁用：`export PAPER_FETCH_NO_AUTO_UPDATE=1`。
 
@@ -46,8 +48,12 @@
 | DOI → PDF | 临时网络搜索 | 确定性 5 源链 |
 | Unpaywall 集成 | 无 | 有，覆盖率最高 |
 | arXiv / PMC / bioRxiv 回退 | 手动 | 自动 |
-| 批量下载 | 无 | `--batch dois.txt` |
+| 批量下载 | 无 | `--batch dois.txt` 或 `--batch -`（stdin） |
 | 一致的文件命名 | 无 | `author_year_title.pdf` |
+| 机器可读 schema | 无 | `fetch.py schema` |
+| 结构化输出 | 无 | 稳定 JSON 信封 + stderr NDJSON 进度 |
+| 幂等重试 | 无 | `--idempotency-key` 复用原信封 |
+| 退出码分类 | 无 | `0`/`1`/`3`/`4` — orchestrator 可按类路由失败 |
 | 合法来源保证 | 无 | 硬性拒绝付费墙绕过 |
 | 依赖 | 各异 | 仅 Python 标准库 |
 
@@ -156,6 +162,31 @@ python scripts/fetch.py 10.1038/s41586-020-2649-2 --dry-run
 
 ```bash
 python scripts/fetch.py 10.1038/s41586-020-2649-2 --format text
+```
+
+从管道读入 DOI：
+
+```bash
+echo 10.1038/s41586-021-03819-2 | python scripts/fetch.py --batch -
+```
+
+可安全重试的批量下载（重试时直接复用原信封）：
+
+```bash
+python scripts/fetch.py --batch dois.txt --out ~/papers \
+    --idempotency-key monday-review-batch
+```
+
+机器可读自描述（供 agent 使用）：
+
+```bash
+python scripts/fetch.py schema --pretty
+```
+
+流式 NDJSON（每个 DOI 解析后立即输出一行结果）：
+
+```bash
+python scripts/fetch.py --batch dois.txt --stream
 ```
 
 或者直接对 agent 说：
