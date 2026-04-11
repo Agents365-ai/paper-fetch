@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="zh" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>paper-fetch — 合法开放获取 PDF 下载器</title>
+  <meta name="description" content="Claude Code skill，通过 DOI 从合法 OA 源下载论文 PDF。Unpaywall、Semantic Scholar、arXiv、PMC、bioRxiv 五源回退。学科无关，零依赖。">
+  <meta name="theme-color" content="#0d1117">
+  <link rel="canonical" href="https://agents365-ai.github.io/paper-fetch/zh.html">
+  <link rel="alternate" hreflang="zh" href="https://agents365-ai.github.io/paper-fetch/zh.html">
+  <link rel="alternate" hreflang="en" href="https://agents365-ai.github.io/paper-fetch/">
+  <meta property="og:title" content="paper-fetch — 合法开放获取 PDF 下载器">
+  <meta property="og:description" content="通过 DOI 从 Unpaywall、Semantic Scholar、arXiv、PMC、bioRxiv 合法下载论文 PDF。学科无关，绝不使用 Sci-Hub。">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://agents365-ai.github.io/paper-fetch/zh.html">
+  <meta name="twitter:card" content="summary">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* Theme variables */
+    [data-theme="dark"] {
+      --bg: #0d1117; --bg-card: #161b22; --bg-code: #1c2128;
+      --border: #30363d; --text: #e6edf3; --text-muted: #8b949e;
+      --accent: #58a6ff; --accent-hover: #79c0ff;
+      --green: #3fb950; --red: #f85149;
+    }
+    [data-theme="light"] {
+      --bg: #ffffff; --bg-card: #f6f8fa; --bg-code: #f0f3f6;
+      --border: #d0d7de; --text: #1f2328; --text-muted: #656d76;
+      --accent: #0969da; --accent-hover: #0550ae;
+      --green: #1a7f37; --red: #cf222e;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', Helvetica, Arial, sans-serif;
+      background: var(--bg); color: var(--text); line-height: 1.7; overflow-x: hidden;
+      transition: background 0.3s, color 0.3s;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-hover); text-decoration: underline; }
+    code { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.9em; }
+
+    /* Nav */
+    nav {
+      position: sticky; top: 0; z-index: 100;
+      background: var(--bg); border-bottom: 1px solid var(--border);
+      padding: 12px 24px; display: flex; justify-content: space-between; align-items: center;
+      transition: background 0.3s;
+    }
+    nav .logo { font-weight: 700; font-size: 16px; color: var(--text); }
+    nav .logo span { color: var(--accent); }
+    nav .nav-right { display: flex; align-items: center; gap: 16px; }
+    .lang-switch {
+      font-size: 14px; font-weight: 500; color: var(--text-muted);
+      padding: 4px 12px; border: 1px solid var(--border); border-radius: 6px;
+      transition: all 0.2s;
+    }
+    .lang-switch:hover { color: var(--text); border-color: var(--text-muted); text-decoration: none; }
+    .theme-btn {
+      background: none; border: 1px solid var(--border); color: var(--text-muted);
+      border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 16px;
+      transition: all 0.2s; line-height: 1;
+    }
+    .theme-btn:hover { color: var(--text); border-color: var(--text-muted); }
+
+    /* Layout */
+    .container { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+    section { padding: 72px 0; }
+    section + section { border-top: 1px solid var(--border); }
+
+    /* Hero */
+    .hero { text-align: center; padding: 96px 0 72px; border-bottom: 1px solid var(--border); }
+    .hero-badge {
+      display: inline-block; font-size: 13px; color: var(--accent);
+      border: 1px solid var(--accent); border-radius: 20px;
+      padding: 4px 14px; margin-bottom: 20px; letter-spacing: 0.5px;
+    }
+    .hero h1 { font-size: 48px; font-weight: 800; margin-bottom: 16px; letter-spacing: -1px; }
+    .hero h1 span { color: var(--accent); }
+    .hero p { font-size: 20px; color: var(--text-muted); max-width: 640px; margin: 0 auto 32px; }
+    .hero-install {
+      display: inline-flex; align-items: center; gap: 12px;
+      background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px;
+      padding: 12px 20px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 15px;
+      margin-bottom: 24px; max-width: 100%; overflow-x: auto;
+    }
+    .hero-install code { color: var(--green); white-space: nowrap; }
+    .copy-btn {
+      background: none; border: 1px solid var(--border); color: var(--text-muted);
+      border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 13px; transition: all 0.2s;
+      flex-shrink: 0;
+    }
+    .copy-btn:hover { color: var(--text); border-color: var(--text-muted); }
+    .hero-links { display: flex; justify-content: center; gap: 16px; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px; padding: 10px 24px;
+      border-radius: 8px; font-size: 15px; font-weight: 600; transition: all 0.2s;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    [data-theme="light"] .btn-primary { color: #fff; }
+    .btn-primary:hover { background: var(--accent-hover); text-decoration: none; }
+    .btn-outline { border: 1px solid var(--border); color: var(--text); }
+    .btn-outline:hover { border-color: var(--text-muted); text-decoration: none; }
+
+    /* Section headers */
+    .section-title { font-size: 32px; font-weight: 700; margin-bottom: 8px; text-align: center; }
+    .section-sub { color: var(--text-muted); font-size: 17px; text-align: center; margin-bottom: 48px; max-width: 720px; margin-left: auto; margin-right: auto; }
+
+    /* Feature cards */
+    .features-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+    .feature-card {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: 12px; padding: 28px; transition: background 0.3s;
+    }
+    .feature-icon { font-size: 28px; margin-bottom: 12px; }
+    .feature-card h3 { font-size: 18px; margin-bottom: 8px; }
+    .feature-card p { color: var(--text-muted); font-size: 14px; }
+    .feature-card code { background: var(--bg-code); padding: 1px 6px; border-radius: 4px; color: var(--accent); }
+
+    /* Resolution chain */
+    .chain { display: flex; flex-direction: column; gap: 12px; max-width: 760px; margin: 0 auto; }
+    .chain-step {
+      display: flex; align-items: flex-start; gap: 16px;
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: 10px; padding: 20px 24px;
+    }
+    .chain-num {
+      flex-shrink: 0; width: 32px; height: 32px; border-radius: 50%;
+      background: var(--accent); color: #fff; font-weight: 700;
+      display: flex; align-items: center; justify-content: center; font-size: 14px;
+    }
+    .chain-body h4 { font-size: 16px; margin-bottom: 4px; }
+    .chain-body p { color: var(--text-muted); font-size: 14px; margin: 0; }
+    .chain-body code { background: var(--bg-code); padding: 1px 6px; border-radius: 4px; color: var(--accent); }
+
+    /* Coverage / Compare tables */
+    .cov-table, .compare-table { width: 100%; border-collapse: collapse; font-size: 15px; }
+    .cov-table th, .cov-table td,
+    .compare-table th, .compare-table td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); }
+    .cov-table th, .compare-table th { color: var(--text-muted); font-weight: 600; font-size: 13px; letter-spacing: 0.5px; }
+    .cov-table tr:hover, .compare-table tr:hover { background: var(--bg-card); }
+    .cov-table td:first-child { font-weight: 600; }
+    .cov-all { color: var(--green); font-weight: 600; }
+    .check { color: var(--green); font-weight: 700; }
+    .cross { color: var(--red); }
+
+    /* Install tabs */
+    .tabs { display: flex; gap: 0; margin-bottom: 0; flex-wrap: wrap; }
+    .tab {
+      padding: 10px 20px; background: var(--bg-card); border: 1px solid var(--border);
+      border-bottom: none; color: var(--text-muted); cursor: pointer;
+      font-size: 14px; font-weight: 500; transition: all 0.2s;
+    }
+    .tab:first-child { border-radius: 8px 0 0 0; }
+    .tab:last-child { border-radius: 0 8px 0 0; }
+    button.tab { font-family: inherit; }
+    .tab.active { background: var(--bg-code); color: var(--text); border-bottom-color: var(--bg-code); }
+    .tab-content {
+      display: none; background: var(--bg-code); border: 1px solid var(--border);
+      border-radius: 0 8px 8px 8px; padding: 20px;
+    }
+    .tab-content.active { display: block; }
+    .tab-content pre {
+      font-family: 'SF Mono', 'Fira Code', monospace; font-size: 14px;
+      line-height: 1.5; white-space: pre-wrap; color: var(--green);
+    }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border); padding: 32px 0;
+      text-align: center; color: var(--text-muted); font-size: 14px;
+    }
+    footer a { color: var(--text-muted); }
+    footer a:hover { color: var(--text); }
+
+    /* Responsive */
+    @media (max-width: 640px) {
+      .hero h1 { font-size: 32px; }
+      .hero p { font-size: 17px; }
+      section { padding: 48px 0; }
+      .features-grid { grid-template-columns: 1fr; }
+      .hero-install { flex-direction: column; font-size: 13px; }
+      .hero-install code { white-space: normal; word-break: break-all; text-align: center; }
+    }
+    .skip-link {
+      position: absolute; top: -40px; left: 0; background: var(--accent); color: #fff;
+      padding: 8px 16px; z-index: 200; font-size: 14px; transition: top 0.2s;
+    }
+    .skip-link:focus { top: 0; }
+    .table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  </style>
+</head>
+<body>
+  <a href="#main-content" class="skip-link">跳转到主要内容</a>
+
+  <nav role="navigation" aria-label="主导航">
+    <div class="logo">paper-<span>fetch</span></div>
+    <div class="nav-right">
+      <a href="index.html" class="lang-switch">English</a>
+      <button class="theme-btn" onclick="toggleTheme()" title="切换主题" aria-label="切换明暗主题">&#x1F319;</button>
+    </div>
+  </nav>
+
+  <main id="main-content">
+  <!-- Hero -->
+  <div class="hero">
+    <div class="container">
+      <div class="hero-badge">5 源合法 OA 回退链</div>
+      <h1>paper-<span>fetch</span></h1>
+      <p>输入 DOI，输出 PDF。一个 Claude Code skill，通过 Unpaywall、Semantic Scholar、arXiv、PubMed Central、bioRxiv 合法解析论文 PDF —— 覆盖所有学科，零依赖。</p>
+      <div class="hero-install">
+        <code id="install-cmd">git clone https://github.com/Agents365-ai/paper-fetch.git ~/.claude/skills/paper-fetch</code>
+        <button class="copy-btn" onclick="copyInstall()">复制</button>
+      </div>
+      <div class="hero-links">
+        <a href="https://github.com/Agents365-ai/paper-fetch" class="btn btn-primary">GitHub</a>
+        <a href="https://skillsmp.com/skills/agents365-ai-paper-fetch-skill-md" class="btn btn-outline">SkillsMP</a>
+        <a href="#install" class="btn btn-outline">安装指南</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Features -->
+  <section>
+    <div class="container">
+      <h2 class="section-title">为什么选择这个 Skill</h2>
+      <p class="section-sub">一个确定性的、仅合法的 "帮我找 PDF" 替代方案。</p>
+      <div class="features-grid">
+        <div class="feature-card">
+          <div class="feature-icon">&#x1F517;</div>
+          <h3>5 源回退链</h3>
+          <p>Unpaywall &rarr; Semantic Scholar &rarr; arXiv &rarr; PubMed Central &rarr; bioRxiv/medRxiv。命中即停，都失败时输出元数据提示走馆际互借。</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#x1F310;</div>
+          <h3>全学科支持</h3>
+          <p>不只是生命科学或计算机。Unpaywall + Semantic Scholar 覆盖人文、社科、化学、物理、经济 —— 任何 Crossref DOI。</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#x1F6E1;&#xFE0F;</div>
+          <h3>始终合法</h3>
+          <p>绝不使用 Sci-Hub 或任何付费墙绕过服务。没有 OA 版本时如实报告失败，返回标题 + 作者信息便于发起 ILL 请求。</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#x26A1;</div>
+          <h3>零依赖</h3>
+          <p>纯 Python 3.8+ 标准库。无需 <code>pip install</code>，无需虚拟环境，无需 Node.js —— clone 下来就能跑。</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#x1F4E6;</div>
+          <h3>批量模式</h3>
+          <p>通过 <code>--batch dois.txt</code> 传入 DOI 列表。自动命名为 <code>作者_年份_标题.pdf</code>，便于文献库统一管理。</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">&#x1F916;</div>
+          <h3>Agent 原生输出</h3>
+          <p>stdout 输出结构化 JSON，stderr 输出诊断信息，提供有意义的退出码（0/1/3）和可重试错误分类。为 AI agent 而生，人类也能读。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Resolution chain -->
+  <section>
+    <div class="container">
+      <h2 class="section-title">DOI 解析流程</h2>
+      <p class="section-sub">按顺序尝试每个来源，第一个返回有效 PDF 的源即停止。</p>
+      <div class="chain">
+        <div class="chain-step">
+          <div class="chain-num">1</div>
+          <div class="chain-body">
+            <h4>Unpaywall</h4>
+            <p>查询 <code>api.unpaywall.org/v2/{doi}</code>，读取 <code>best_oa_location.url_for_pdf</code>。覆盖所有出版社在机构知识库中的 OA 版本。需要 <code>UNPAYWALL_EMAIL</code>（可选，未设置时跳过）。</p>
+          </div>
+        </div>
+        <div class="chain-step">
+          <div class="chain-num">2</div>
+          <div class="chain-body">
+            <h4>Semantic Scholar</h4>
+            <p>查询 <code>api.semanticscholar.org/graph/v1/paper/DOI:{doi}</code>，读取 <code>openAccessPdf</code> 字段和 <code>externalIds</code>（arXiv、PMC）。跨领域学术图谱。</p>
+          </div>
+        </div>
+        <div class="chain-step">
+          <div class="chain-num">3</div>
+          <div class="chain-body">
+            <h4>arXiv</h4>
+            <p>若论文有 arXiv ID，从 <code>arxiv.org/pdf/{arxiv_id}.pdf</code> 下载。覆盖物理、数学、CS、统计、定量金融、经济和电气工程。</p>
+          </div>
+        </div>
+        <div class="chain-step">
+          <div class="chain-num">4</div>
+          <div class="chain-body">
+            <h4>PubMed Central OA</h4>
+            <p>若论文有 PMCID，从 <code>ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/</code> 下载。仅生物医学 OA 子集。</p>
+          </div>
+        </div>
+        <div class="chain-step">
+          <div class="chain-num">5</div>
+          <div class="chain-body">
+            <h4>bioRxiv / medRxiv</h4>
+            <p>若 DOI 前缀为 <code>10.1101</code>，查询 <code>api.biorxiv.org/details/{server}/{doi}</code> 获取最新版本的 PDF URL。生物和医学预印本。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Discipline coverage -->
+  <section>
+    <div class="container">
+      <h2 class="section-title">学科覆盖</h2>
+      <p class="section-sub">适用于所有学科，不只是生命科学或计算机。能否拿到取决于 OA 可用性，而非学科本身。</p>
+      <div class="table-wrapper">
+      <table class="cov-table">
+        <thead>
+          <tr><th>来源</th><th>学科范围</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Unpaywall</td><td><span class="cov-all">全学科</span> —— 覆盖每一个 Crossref DOI（人文、社科、物理、化学、经济……）</td></tr>
+          <tr><td>Semantic Scholar</td><td><span class="cov-all">全学科</span> —— 跨领域学术图谱</td></tr>
+          <tr><td>arXiv</td><td>物理、数学、CS、统计、定量金融、经济学、电气工程</td></tr>
+          <tr><td>PubMed Central</td><td>仅生物医学</td></tr>
+          <tr><td>bioRxiv / medRxiv</td><td>仅生物 / 医学预印本</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p style="color: var(--text-muted); font-size: 15px; text-align: center; margin-top: 32px; max-width: 760px; margin-left: auto; margin-right: auto;">
+        实际使用中，<strong style="color: var(--text);">仅 Unpaywall + Semantic Scholar 两个源就足以覆盖化学、材料、经济、心理学、人文社科等任何领域的 OA 论文</strong> —— 它们会自动命中机构知识库、SSRN、RePEc 以及出版商自托管的 OA 版本。arXiv/PMC/bioRxiv 只是针对各自领域的额外回退。若论文确实没有任何合法 OA 版本，skill 会如实报告失败 —— 按设计<strong style="color: var(--text);">绝不</strong>绕过付费墙，任何学科都一视同仁。
+      </p>
+    </div>
+  </section>
+
+  <!-- Comparison -->
+  <section>
+    <div class="container">
+      <h2 class="section-title">对比原生智能体</h2>
+      <p class="section-sub">使用本 skill 与直接让 LLM "找这篇 PDF" 的区别。</p>
+      <div class="table-wrapper">
+      <table class="compare-table">
+        <thead>
+          <tr><th>功能</th><th>原生智能体</th><th>本 Skill</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>DOI 解析策略</td><td class="cross">临时网络搜索</td><td class="check">&#x2713; 确定性 5 源链</td></tr>
+          <tr><td>Unpaywall 集成</td><td class="cross">&#x2717;</td><td class="check">&#x2713; OA 命中率最高</td></tr>
+          <tr><td>arXiv / PMC / bioRxiv 回退</td><td class="cross">手动</td><td class="check">&#x2713; 自动</td></tr>
+          <tr><td>批量下载</td><td class="cross">&#x2717;</td><td class="check">&#x2713; <code>--batch dois.txt</code></td></tr>
+          <tr><td>统一文件命名</td><td class="cross">&#x2717;</td><td class="check">&#x2713; <code>author_year_title.pdf</code></td></tr>
+          <tr><td>Agent 原生 JSON 输出</td><td class="cross">&#x2717;</td><td class="check">&#x2713; 结构化契约</td></tr>
+          <tr><td>预览模式</td><td class="cross">&#x2717;</td><td class="check">&#x2713; <code>--dry-run</code> 解析不下载</td></tr>
+          <tr><td>域名白名单安全</td><td class="cross">&#x2717;</td><td class="check">&#x2713; 仅限已知 OA 域名</td></tr>
+          <tr><td>50 MB 大小限制</td><td class="cross">&#x2717;</td><td class="check">&#x2713; 防止异常大文件</td></tr>
+          <tr><td>PDF 头校验</td><td class="cross">&#x2717;</td><td class="check">&#x2713; 拒绝 HTML 落地页</td></tr>
+          <tr><td>合法来源保证</td><td class="cross">无</td><td class="check">&#x2713; 硬性拒绝付费墙绕过</td></tr>
+          <tr><td>依赖</td><td class="cross">各异</td><td class="check">&#x2713; 仅 Python 标准库</td></tr>
+          <tr><td>跨学科支持</td><td class="cross">不确定</td><td class="check">&#x2713; 任何领域</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Install -->
+  <section id="install">
+    <div class="container">
+      <h2 class="section-title">安装</h2>
+      <p class="section-sub">选择你的平台，10 秒搞定。无需 <code>pip install</code>。</p>
+      <div class="tabs" role="tablist" aria-label="安装平台">
+        <button class="tab active" role="tab" aria-selected="true" aria-controls="tab-claude" onclick="switchTab(event, 'tab-claude')">Claude Code</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="tab-openclaw" onclick="switchTab(event, 'tab-openclaw')">OpenClaw</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="tab-pimono" onclick="switchTab(event, 'tab-pimono')">pi-mono</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="tab-codex" onclick="switchTab(event, 'tab-codex')">Codex</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="tab-hermes" onclick="switchTab(event, 'tab-hermes')">Hermes</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="tab-skillsmp" onclick="switchTab(event, 'tab-skillsmp')">SkillsMP</button>
+      </div>
+      <div id="tab-claude" class="tab-content active" role="tabpanel">
+        <pre># 全局安装（所有项目可用）
+git clone https://github.com/Agents365-ai/paper-fetch.git ~/.claude/skills/paper-fetch
+
+# 项目级安装
+git clone https://github.com/Agents365-ai/paper-fetch.git .claude/skills/paper-fetch
+
+# 可选：设置 Unpaywall 联系邮箱以获得最高命中率
+export UNPAYWALL_EMAIL=you@example.com</pre>
+      </div>
+      <div id="tab-openclaw" class="tab-content" role="tabpanel">
+        <pre># 通过 ClawHub 安装
+clawhub install paper-fetch
+
+# 手动安装
+git clone https://github.com/Agents365-ai/paper-fetch.git ~/.openclaw/skills/paper-fetch</pre>
+      </div>
+      <div id="tab-pimono" class="tab-content" role="tabpanel">
+        <pre># 用户级安装
+git clone https://github.com/Agents365-ai/paper-fetch.git ~/.pimo/skills/paper-fetch</pre>
+      </div>
+      <div id="tab-codex" class="tab-content" role="tabpanel">
+        <pre># 用户级安装
+git clone https://github.com/Agents365-ai/paper-fetch.git ~/.agents/skills/paper-fetch
+
+# 项目级安装
+git clone https://github.com/Agents365-ai/paper-fetch.git .agents/skills/paper-fetch</pre>
+      </div>
+      <div id="tab-hermes" class="tab-content" role="tabpanel">
+        <pre># 安装到 research 分类
+git clone https://github.com/Agents365-ai/paper-fetch.git ~/.hermes/skills/research/paper-fetch
+
+# 或在 ~/.hermes/config.yaml 中配置
+skills:
+  external_dirs:
+    - ~/myskills/paper-fetch</pre>
+      </div>
+      <div id="tab-skillsmp" class="tab-content" role="tabpanel">
+        <pre># 通过 SkillsMP CLI
+skills install paper-fetch</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- Usage -->
+  <section>
+    <div class="container">
+      <h2 class="section-title">使用</h2>
+      <p class="section-sub">直接命令行调用，或用自然语言让 agent 执行。</p>
+      <div class="tab-content active" style="border-radius: 8px; max-width: 760px; margin: 0 auto;">
+        <pre># 单个 DOI（供 agent 使用的 JSON 输出）
+python scripts/fetch.py 10.1038/s41586-020-2649-2
+
+# 人类可读格式
+python scripts/fetch.py 10.1038/s41586-020-2649-2 --format text
+
+# 预览模式 —— 只解析不下载
+python scripts/fetch.py 10.1038/s41586-020-2649-2 --dry-run
+
+# 批量模式 —— 每行一个 DOI
+python scripts/fetch.py --batch dois.txt --out ~/papers</pre>
+      </div>
+      <p style="color: var(--text-muted); font-size: 15px; text-align: center; margin-top: 32px;">
+        或者直接对 agent 说：
+        <em style="color: var(--text);">"帮我把 AlphaFold2 那篇论文下到 ~/papers。"</em>
+      </p>
+    </div>
+  </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer>
+    <div class="container">
+      <p>
+        MIT 许可证 &middot;
+        <a href="https://github.com/Agents365-ai/paper-fetch">GitHub</a> &middot;
+        <a href="https://github.com/Agents365-ai">Agents365-ai</a>
+      </p>
+      <p style="margin-top: 8px; font-size: 12px;">
+        绝不使用 Sci-Hub 或任何付费墙绕过服务。仅限开放获取来源。
+      </p>
+    </div>
+  </footer>
+
+  <script>
+    function copyInstall() {
+      const cmd = document.getElementById('install-cmd').textContent;
+      navigator.clipboard.writeText(cmd).then(() => {
+        const btn = document.querySelector('.copy-btn');
+        btn.textContent = '已复制!';
+        setTimeout(() => btn.textContent = '复制', 2000);
+      });
+    }
+    function switchTab(e, id) {
+      document.querySelectorAll('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
+      document.querySelectorAll('.tab-content').forEach(t => {
+        if (t.id && t.id.startsWith('tab-')) t.classList.remove('active');
+      });
+      e.target.classList.add('active');
+      e.target.setAttribute('aria-selected', 'true');
+      document.getElementById(id).classList.add('active');
+    }
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+      document.querySelector('.theme-btn').innerHTML = next === 'dark' ? '&#x1F319;' : '&#x2600;&#xFE0F;';
+    }
+    // Restore saved theme
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved) {
+        document.documentElement.setAttribute('data-theme', saved);
+        document.querySelector('.theme-btn').innerHTML = saved === 'dark' ? '&#x1F319;' : '&#x2600;&#xFE0F;';
+      }
+    })();
+  </script>
+</body>
+</html>
