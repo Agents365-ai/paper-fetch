@@ -25,6 +25,7 @@ agents that cache schema should compare against it to detect drift.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -39,8 +40,8 @@ from pathlib import Path
 # Versioning
 # ---------------------------------------------------------------------------
 
-CLI_VERSION = "0.7.0"
-SCHEMA_VERSION = "1.3.0"
+CLI_VERSION = "0.8.0"
+SCHEMA_VERSION = "1.4.0"
 
 # ---------------------------------------------------------------------------
 # Config
@@ -135,6 +136,100 @@ def _allowed_hosts() -> set[str]:
         return _BASE_ALLOWED_HOSTS
     more = {h.strip().lower() for h in extra.split(",") if h.strip()}
     return _BASE_ALLOWED_HOSTS | more
+
+
+# ---------------------------------------------------------------------------
+# Institutional mode
+# ---------------------------------------------------------------------------
+
+# Rate limit (institutional mode only — public OA sources are unmetered by
+# their operators and do not need client-side pacing).
+INSTITUTIONAL_RATE_PER_SEC = 1.0
+
+# Hostnames blocked in every mode. Covers two threat classes:
+#   - loopback aliases that resolve to 127.0.0.1 / ::1 but pass the IP literal
+#     check (the ip literal check only fires when the URL host IS an IP)
+#   - cloud metadata endpoints that can leak IAM credentials if an SSRF
+#     target pivoted into fetching from them
+# This does not defend against DNS rebinding — a hostname pointing at a
+# public IP at validation time but a private IP at connection time slips
+# through. Mitigating that requires pin-after-resolve and is out of scope
+# for v0.8.0.
+_BLOCKED_HOSTS = {
+    # Loopback aliases
+    "localhost",
+    "localhost.localdomain",
+    "ip6-localhost",
+    "ip6-loopback",
+    # Cloud metadata
+    "metadata.google.internal",
+    "metadata.aws.internal",
+    "metadata",  # some cloud SDKs resolve bare 'metadata'
+}
+
+
+def _is_institutional() -> bool:
+    """True iff the operator has opted the process into institutional mode."""
+    return bool(os.environ.get("PAPER_FETCH_INSTITUTIONAL"))
+
+
+def _auth_mode() -> str:
+    return "institutional" if _is_institutional() else "public"
+
+
+def _is_safe_url(url: str) -> tuple[bool, str]:
+    """Universal URL safety check — applied in every mode.
+
+    Returns (ok, reason). Blocks SSRF vectors regardless of whether the
+    hostname would pass the allowlist check:
+      - non-http(s) schemes (file://, ftp://, gopher://, etc.)
+      - non-80/443 ports
+      - IP literals in private / loopback / link-local / reserved space
+      - known cloud metadata hostnames
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return False, "malformed_url"
+    if parsed.scheme not in ("http", "https"):
+        return False, "scheme_not_allowed"
+    if parsed.port is not None and parsed.port not in (80, 443):
+        return False, "port_not_allowed"
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False, "empty_host"
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            return False, "private_ip"
+    except ValueError:
+        pass  # hostname is a name, not a literal — fine
+    if host in _BLOCKED_HOSTS:
+        return False, "blocked_host"
+    return True, ""
+
+
+# Simple per-process token bucket. Single-threaded, so no locking needed.
+_last_request_monotonic: float = 0.0
+
+
+def _rate_limit_gate() -> None:
+    """Enforce INSTITUTIONAL_RATE_PER_SEC pacing. No-op in public mode.
+
+    Runs before every outbound HTTP request in institutional mode so
+    that a single process cannot inadvertently hammer a publisher's
+    servers beyond the configured rate.
+    """
+    global _last_request_monotonic
+    if not _is_institutional():
+        return
+    min_interval = 1.0 / INSTITUTIONAL_RATE_PER_SEC
+    now = time.monotonic()
+    wait = _last_request_monotonic + min_interval - now
+    if wait > 0:
+        time.sleep(wait)
+        now = time.monotonic()
+    _last_request_monotonic = now
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +353,7 @@ def _meta(extra: dict | None = None) -> dict:
         "latency_ms": _now_ms(),
         "schema_version": SCHEMA_VERSION,
         "cli_version": CLI_VERSION,
+        "auth_mode": _auth_mode(),
     }
     if extra:
         m.update(extra)
@@ -280,6 +376,7 @@ def _envelope_err(code: str, message: str, *, retryable: bool = False, **ctx) ->
 
 
 def _get(url: str, *, accept: str = "application/json", timeout: int) -> bytes:
+    _rate_limit_gate()
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
@@ -290,10 +387,24 @@ def _get_json(url: str, *, timeout: int):
 
 
 def _is_allowed_host(url: str) -> bool:
-    try:
-        host = (urllib.parse.urlparse(url).hostname or "").lower()
-    except Exception:
+    """Gatekeeper for any outbound PDF fetch.
+
+    Layered:
+      1. SSRF defense runs first — applies in ALL modes. Blocks private IPs,
+         non-http(s) schemes, non-80/443 ports, cloud metadata hostnames.
+      2. Public mode additionally requires the hostname to be in the curated
+         OA allowlist (plus any PAPER_FETCH_ALLOWED_HOSTS extensions).
+      3. Institutional mode trusts the operator's opt-in — any public HTTPS
+         host passing the SSRF check is allowed. The user's own subscription
+         (IP range / cookies) determines whether the publisher actually
+         serves the PDF.
+    """
+    ok, _reason = _is_safe_url(url)
+    if not ok:
         return False
+    if _is_institutional():
+        return True
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
     return host in _allowed_hosts()
 
 
@@ -302,6 +413,7 @@ def _download(url: str, dest: Path, *, timeout: int) -> str | None:
     if not _is_allowed_host(url):
         _progress("download_error", reason="host_not_allowed", url=url)
         return "host_not_allowed"
+    _rate_limit_gate()
     req = urllib.request.Request(
         url,
         headers={
@@ -660,6 +772,22 @@ def fetch(
     # --- Exhausted all sources with no candidates and no prior attempts → not_found ---
     if not candidates and not download_errors:
         _progress("not_found", doi=doi)
+        err = {
+            "code": "not_found",
+            "message": "No open-access PDF found",
+            "retryable": True,
+            "retry_after_hours": RETRY_AFTER_HOURS["not_found"],
+            "reason": "OA availability changes over time; retry after embargo lifts or preprint appears",
+        }
+        # In public mode, suggest institutional access as a next avenue.
+        # Silent in institutional mode — if they're already opted in and the
+        # paper still wasn't found, the subscription doesn't cover it.
+        if not _is_institutional():
+            err["suggest_institutional"] = True
+            err["hint"] = (
+                "If your institution has a subscription to this paper, "
+                "set PAPER_FETCH_INSTITUTIONAL=1 and run from on-campus or VPN."
+            )
         return {
             "doi": doi,
             "success": False,
@@ -668,13 +796,7 @@ def fetch(
             "file": None,
             "meta": meta or {},
             "sources_tried": sources_tried,
-            "error": {
-                "code": "not_found",
-                "message": "No open-access PDF found",
-                "retryable": True,
-                "retry_after_hours": RETRY_AFTER_HOURS["not_found"],
-                "reason": "OA availability changes over time; retry after embargo lifts or preprint appears",
-            },
+            "error": err,
         }
 
     # --- Dry-run preview of first fallback candidate (only reached when Unpaywall didn't hit) ---
@@ -829,9 +951,18 @@ def build_schema() -> dict:
             "partial": {"ok": "partial", "data": {"results": [], "summary": {}, "next": []}, "meta": {}},
             "failure": {"ok": False, "error": {"code": "", "message": "", "retryable": False}, "meta": {}},
         },
+        "meta_fields": {
+            "request_id": "Unique per-invocation id; correlates stderr progress events with the stdout envelope.",
+            "latency_ms": "Wall-clock time from process start to this emit.",
+            "schema_version": "Version of this schema contract; bumped on any additive or breaking change.",
+            "cli_version": "Version of the paper-fetch binary that produced the envelope.",
+            "auth_mode": "Either 'public' (OA-only, curated allowlist) or 'institutional' (user opted in via PAPER_FETCH_INSTITUTIONAL=1; hostname policy open, rate-limited).",
+            "sources_tried": "Union of sources consulted across all DOIs in this run.",
+        },
         "env": {
             "UNPAYWALL_EMAIL": "Optional. Contact email for Unpaywall API. If unset, Unpaywall is skipped.",
-            "PAPER_FETCH_ALLOWED_HOSTS": "Optional. Comma-separated hostnames to extend the download allowlist.",
+            "PAPER_FETCH_ALLOWED_HOSTS": "Optional. Comma-separated hostnames to extend the public-mode OA allowlist. Not needed in institutional mode.",
+            "PAPER_FETCH_INSTITUTIONAL": "Optional. Set to any value to opt into institutional mode: hostname allowlist is lifted (SSRF defense still enforced), rate limiter activates at 1 req/s. Intended for callers whose IP / cookies / EZproxy already grant legitimate subscription access. Does not bypass paywalls.",
             "PAPER_FETCH_NO_AUTO_UPDATE": "Optional. Set to any value to disable silent background self-update.",
             "PAPER_FETCH_UPDATE_INTERVAL": "Optional. Cooldown in seconds between update checks. Default 86400.",
         },
