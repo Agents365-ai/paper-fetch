@@ -39,15 +39,25 @@ from pathlib import Path
 # Versioning
 # ---------------------------------------------------------------------------
 
-CLI_VERSION = "0.5.0"
-SCHEMA_VERSION = "1.1.0"
+CLI_VERSION = "0.6.0"
+SCHEMA_VERSION = "1.2.0"
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
 EMAIL = os.environ.get("UNPAYWALL_EMAIL", "").strip()
+# UA for API calls (Unpaywall requires contact email in the UA per their ToS).
 UA = f"paper-fetch/{CLI_VERSION} (mailto:{EMAIL or 'anonymous'})"
+# UA for PDF downloads — some publishers (e.g., iiarjournals.org) return
+# HTTP 403 for non-browser User-Agents even on OA PDFs. Uses a generic
+# modern browser identifier; the per-request Accept header still declares
+# we want a PDF, and the host allowlist still restricts where we fetch.
+DOWNLOAD_UA = (
+    f"Mozilla/5.0 (compatible; paper-fetch/{CLI_VERSION}; "
+    f"+https://github.com/obra/paper-fetch) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 DEFAULT_TIMEOUT = 30
 MAX_PDF_SIZE = 50 * 1024 * 1024  # 50 MB
 
@@ -67,11 +77,14 @@ _BASE_ALLOWED_HOSTS = {
     "unpaywall.org",
     "arxiv.org",
     "www.ncbi.nlm.nih.gov",
+    "pmc.ncbi.nlm.nih.gov",
     "api.semanticscholar.org",
     "api.biorxiv.org",
     "www.biorxiv.org",
     "www.medrxiv.org",
     "europepmc.org",
+    "www.ebi.ac.uk",
+    "ftp.ebi.ac.uk",
     "www.nature.com",
     "link.springer.com",
     "journals.plos.org",
@@ -90,6 +103,19 @@ _BASE_ALLOWED_HOSTS = {
     "openreview.net",
     "dl.acm.org",
     "ieeexplore.ieee.org",
+    # Additional OA publishers encountered in practice
+    "iv.iiarjournals.org",
+    "ar.iiarjournals.org",
+    "cgp.iiarjournals.org",
+    "aacrjournals.org",
+    "www.spandidos-publications.com",
+    "www.karger.com",
+    "www.thieme-connect.de",
+    "www.liebertpub.com",
+    "www.hindawi.com",
+    "www.dovepress.com",
+    "bmcmedicine.biomedcentral.com",
+    "www.aging-us.com",
 }
 
 
@@ -263,8 +289,16 @@ def _download(url: str, dest: Path, *, timeout: int) -> str | None:
     if not _is_allowed_host(url):
         _progress("download_error", reason="host_not_allowed", url=url)
         return "host_not_allowed"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": DOWNLOAD_UA,
+            "Accept": "application/pdf,*/*;q=0.8",
+        },
+    )
     try:
-        data = _get(url, accept="application/pdf", timeout=timeout)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = r.read(MAX_PDF_SIZE + 1)
     except Exception as e:
         _progress("download_error", reason="network_error", error=str(e))
         return "network_error"
@@ -349,6 +383,33 @@ def try_pmc(pmcid: str) -> str:
     return f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/"
 
 
+def try_europe_pmc(pmcid: str) -> str:
+    """Europe PMC's render endpoint — mirror of PMC without PoW challenge.
+
+    For articles flagged as hasPDF=Y in Europe PMC's catalog, this returns
+    the paper's PDF directly. Useful as a fallback when NCBI PMC returns
+    its cloudpmc-viewer JavaScript proof-of-work page.
+    """
+    pmcid = pmcid if pmcid.startswith("PMC") else f"PMC{pmcid}"
+    return f"https://europepmc.org/articles/{pmcid}?pdf=render"
+
+
+_PMCID_URL_RE = re.compile(r"/pmc/articles/(PMC\d+)", re.IGNORECASE)
+
+
+def _pmcid_from_url(url: str | None) -> str | None:
+    """Extract a PMCID from a URL like https://www.ncbi.nlm.nih.gov/pmc/articles/PMC123/...
+
+    S2's openAccessPdf.url often points to a PMC article without also
+    populating externalIds.PubMedCentral; parsing the URL recovers the id
+    so we can still build Europe PMC / PMC fallback candidates.
+    """
+    if not url:
+        return None
+    m = _PMCID_URL_RE.search(url)
+    return m.group(1).upper() if m else None
+
+
 def try_biorxiv(doi: str, *, timeout: int) -> str | None:
     if not doi.startswith("10.1101/"):
         return None
@@ -367,6 +428,41 @@ def try_biorxiv(doi: str, *, timeout: int) -> str | None:
 # ---------------------------------------------------------------------------
 # Core fetch logic
 # ---------------------------------------------------------------------------
+
+
+def _download_failure(
+    doi: str,
+    meta: dict,
+    sources_tried: list[str],
+    errors: list[dict],
+    *,
+    candidates: list[tuple[str, str]] | None = None,
+) -> dict:
+    """Build a per-item download failure result. `errors` must be non-empty."""
+    last = errors[-1]
+    retryable = last["reason"] in ("network_error", "size_exceeded", "io_error")
+    out = {
+        "doi": doi,
+        "success": False,
+        "source": last["source"],
+        "pdf_url": last["url"],
+        "file": None,
+        "meta": meta or {},
+        "sources_tried": sources_tried,
+        "download_attempts": errors,
+        "error": {
+            "code": f"download_{last['reason']}",
+            "message": (
+                f"All {len(errors)} candidate(s) failed; last error from {last['source']}: {last['reason']}"
+                if len(errors) > 1
+                else f"Download failed from {last['source']}: {last['reason']}"
+            ),
+            "retryable": retryable,
+        },
+    }
+    if candidates:
+        out["candidates"] = [{"source": s, "url": u} for s, u in candidates]
+    return out
 
 
 def fetch(
@@ -390,76 +486,162 @@ def fetch(
     _progress("start", doi=doi)
 
     sources_tried: list[str] = []
-    pdf_url: str | None = None
     meta: dict = {}
-    source = "none"
+    download_errors: list[dict] = []
 
+    # Fatal download errors that abort the fallback loop (machine-local, not URL-specific).
+    FATAL_DL_ERRORS = ("size_exceeded", "io_error")
+
+    def _merge_meta(extra: dict) -> list[str]:
+        added: list[str] = []
+        for k, v in (extra or {}).items():
+            if v and not meta.get(k):
+                meta[k] = v
+                added.append(k)
+        return added
+
+    # --- Semantic Scholar is queried lazily (cached). Provides metadata,
+    # its own PDF URL, and externalIds (PMCID, arXiv id) used to construct
+    # additional candidates. Only called when needed so that a successful
+    # Unpaywall hit with complete metadata short-circuits the flow. ---
+    _s2_cache: dict | None = None
+
+    def _get_s2() -> tuple[str | None, dict, dict]:
+        nonlocal _s2_cache
+        if _s2_cache is not None:
+            return _s2_cache["pdf"], _s2_cache["meta"], _s2_cache["ext"]
+        if "semantic_scholar" not in sources_tried:
+            sources_tried.append("semantic_scholar")
+        _progress("source_try", doi=doi, source="semantic_scholar")
+        pdf, s2_meta, ext = try_semantic_scholar(doi, timeout=timeout)
+        _s2_cache = {"pdf": pdf, "meta": s2_meta, "ext": ext}
+        return pdf, s2_meta, ext
+
+    # --- Unpaywall first (often the quickest OA link) ---
+    up_url: str | None = None
     if EMAIL:
         _progress("source_try", doi=doi, source="unpaywall")
         sources_tried.append("unpaywall")
-        pdf_url, meta = try_unpaywall(doi, timeout=timeout)
-        if pdf_url:
-            _progress("source_hit", doi=doi, source="unpaywall", pdf_url=pdf_url)
-            source = "unpaywall"
+        up_url, up_meta = try_unpaywall(doi, timeout=timeout)
+        _merge_meta(up_meta)
+        if up_url:
+            _progress("source_hit", doi=doi, source="unpaywall", pdf_url=up_url)
+            # Enrich metadata from S2 if Unpaywall didn't give us author/title
+            # (prevents unknown_<year>_paper.pdf filenames).
+            if not meta.get("author") or not meta.get("title"):
+                _, s2_meta, _ = _get_s2()
+                added = _merge_meta(s2_meta)
+                if added:
+                    _progress("source_enrich", doi=doi, source="semantic_scholar", fields=added)
+                elif not s2_meta:
+                    _progress("source_enrich_failed", doi=doi, source="semantic_scholar", reason="s2_unavailable")
         else:
             _progress("source_miss", doi=doi, source="unpaywall")
     else:
         _progress("source_skip", doi=doi, source="unpaywall", reason="UNPAYWALL_EMAIL not set")
 
-    # Metadata enrichment: Unpaywall sometimes returns a PDF URL without
-    # full z_authors or title; enrich from Semantic Scholar so the
-    # derived filename uses the real first author / title instead of
-    # the "unknown_<year>_paper.pdf" fallback. Does not override the
-    # Unpaywall PDF URL.
-    if pdf_url and (not meta.get("author") or not meta.get("title")):
-        _progress("source_try", doi=doi, source="semantic_scholar", reason="metadata_enrichment")
-        if "semantic_scholar" not in sources_tried:
-            sources_tried.append("semantic_scholar")
-        _, s2_meta, _ = try_semantic_scholar(doi, timeout=timeout)
-        enriched_fields = []
-        for k, v in s2_meta.items():
-            if v and not meta.get(k):
-                meta[k] = v
-                enriched_fields.append(k)
-        if enriched_fields:
-            _progress("source_enrich", doi=doi, source="semantic_scholar", fields=enriched_fields)
-        elif not s2_meta:
-            # S2 unreachable during enrichment. The Unpaywall PDF URL is still
-            # valid; the filename will just fall back to "unknown_<year>_…".
-            _progress("source_enrich_failed", doi=doi, source="semantic_scholar", reason="s2_unavailable")
+    # --- Compute destination filename from merged meta ---
+    fname = _filename(meta or {"title": doi})
+    dest = out_dir / fname
 
-    if not pdf_url:
-        _progress("source_try", doi=doi, source="semantic_scholar")
-        sources_tried.append("semantic_scholar")
-        s2_pdf, s2_meta, ext = try_semantic_scholar(doi, timeout=timeout)
-        for k, v in s2_meta.items():
-            if v and not meta.get(k):
-                meta[k] = v
-        if s2_pdf:
-            pdf_url, source = s2_pdf, "semantic_scholar"
-            _progress("source_hit", doi=doi, source="semantic_scholar", pdf_url=pdf_url)
-        else:
-            _progress("source_miss", doi=doi, source="semantic_scholar")
-            if ext.get("ArXiv"):
-                sources_tried.append("arxiv")
-                pdf_url, source = try_arxiv(ext["ArXiv"]), "arxiv"
-                _progress("source_hit", doi=doi, source="arxiv", pdf_url=pdf_url)
-            elif ext.get("PubMedCentral"):
-                sources_tried.append("pmc")
-                pdf_url, source = try_pmc(ext["PubMedCentral"]), "pmc"
-                _progress("source_hit", doi=doi, source="pmc", pdf_url=pdf_url)
+    def _success(src: str, url: str, extra: dict | None = None) -> dict:
+        out = {
+            "doi": doi,
+            "success": True,
+            "source": src,
+            "pdf_url": url,
+            "file": str(dest),
+            "meta": meta or {},
+            "sources_tried": sources_tried,
+        }
+        if extra:
+            out.update(extra)
+        return out
 
-    if not pdf_url and doi.startswith("10.1101/"):
+    # --- Try Unpaywall's PDF first (if we have one) ---
+    if up_url:
+        if dry_run:
+            _progress("dry_run", doi=doi, source="unpaywall", pdf_url=up_url, file=str(dest))
+            return _success("unpaywall", up_url, {"dry_run": True})
+        if dest.exists() and not overwrite:
+            _progress("download_skip", doi=doi, file=str(dest))
+            return _success("unpaywall", up_url, {"skipped": True, "skip_reason": "file_exists"})
+        dl_err = _download(up_url, dest, timeout=timeout)
+        if dl_err is None:
+            _progress("download_ok", doi=doi, file=str(dest), source="unpaywall")
+            return _success("unpaywall", up_url)
+        download_errors.append({"source": "unpaywall", "url": up_url, "reason": dl_err})
+        if dl_err in FATAL_DL_ERRORS:
+            return _download_failure(doi, meta, sources_tried, download_errors)
+        # Non-fatal download failure — fall through to additional sources as fallback.
+
+    # --- Force S2 lookup (for fallback PDF URL + externalIds) ---
+    s2_pdf, s2_meta, ext = _get_s2()
+    _merge_meta(s2_meta)
+
+    # If the Unpaywall path ran the file-exists check and skipped, we already returned above.
+    # For the remaining sources, check destination once more in case enrichment changed the name.
+    fname = _filename(meta or {"title": doi})
+    dest = out_dir / fname
+
+    # --- Build fallback candidate list (deduped by URL) ---
+    # Any URL already attempted via Unpaywall is skipped — no point retrying
+    # the exact same URL from a different source label.
+    attempted_urls: set[str] = {e["url"] for e in download_errors}
+    candidates: list[tuple[str, str]] = []
+
+    def _add(src: str, url: str) -> None:
+        if url in attempted_urls:
+            return
+        if any(u == url for _, u in candidates):
+            return
+        attempted_urls.add(url)
+        candidates.append((src, url))
+
+    if s2_pdf:
+        _progress("source_hit", doi=doi, source="semantic_scholar", pdf_url=s2_pdf)
+        _add("semantic_scholar", s2_pdf)
+    elif not up_url:
+        _progress("source_miss", doi=doi, source="semantic_scholar")
+
+    if ext.get("ArXiv"):
+        sources_tried.append("arxiv")
+        arxiv_url = try_arxiv(ext["ArXiv"])
+        _progress("source_hit", doi=doi, source="arxiv", pdf_url=arxiv_url)
+        _add("arxiv", arxiv_url)
+
+    # Recover PMCID from any PMC-style URL we've seen (S2 openAccessPdf often
+    # points to a PMC landing page without populating externalIds.PubMedCentral).
+    if not ext.get("PubMedCentral"):
+        for url_src in (up_url, s2_pdf):
+            pmcid_from_url = _pmcid_from_url(url_src)
+            if pmcid_from_url:
+                ext["PubMedCentral"] = pmcid_from_url
+                break
+
+    if ext.get("PubMedCentral"):
+        # Europe PMC tried first — bypasses NCBI PMC's cloudpmc-viewer JS challenge.
+        sources_tried.append("europe_pmc")
+        epmc_url = try_europe_pmc(ext["PubMedCentral"])
+        _progress("source_hit", doi=doi, source="europe_pmc", pdf_url=epmc_url)
+        _add("europe_pmc", epmc_url)
+        sources_tried.append("pmc")
+        pmc_url = try_pmc(ext["PubMedCentral"])
+        _progress("source_hit", doi=doi, source="pmc", pdf_url=pmc_url)
+        _add("pmc", pmc_url)
+
+    if doi.startswith("10.1101/"):
         _progress("source_try", doi=doi, source="biorxiv")
         sources_tried.append("biorxiv")
-        pdf_url = try_biorxiv(doi, timeout=timeout)
-        if pdf_url:
-            source = "biorxiv"
-            _progress("source_hit", doi=doi, source="biorxiv", pdf_url=pdf_url)
+        bx_url = try_biorxiv(doi, timeout=timeout)
+        if bx_url:
+            _progress("source_hit", doi=doi, source="biorxiv", pdf_url=bx_url)
+            _add("biorxiv", bx_url)
         else:
             _progress("source_miss", doi=doi, source="biorxiv")
 
-    if not pdf_url:
+    # --- Exhausted all sources with no candidates and no prior attempts → not_found ---
+    if not candidates and not download_errors:
         _progress("not_found", doi=doi)
         return {
             "doi": doi,
@@ -478,64 +660,29 @@ def fetch(
             },
         }
 
-    fname = _filename(meta or {"title": doi})
-    dest = out_dir / fname
+    # --- Dry-run preview of first fallback candidate (only reached when Unpaywall didn't hit) ---
+    if dry_run and candidates:
+        src0, url0 = candidates[0]
+        _progress("dry_run", doi=doi, source=src0, pdf_url=url0, file=str(dest))
+        return _success(src0, url0, {"dry_run": True, "candidates": [{"source": s, "url": u} for s, u in candidates]})
 
-    if dry_run:
-        _progress("dry_run", doi=doi, source=source, pdf_url=pdf_url, file=str(dest))
-        return {
-            "doi": doi,
-            "success": True,
-            "source": source,
-            "pdf_url": pdf_url,
-            "file": str(dest),
-            "meta": meta or {},
-            "sources_tried": sources_tried,
-            "dry_run": True,
-        }
-
-    if dest.exists() and not overwrite:
+    # --- File-exists skip on first candidate (non-Unpaywall path) ---
+    if candidates and dest.exists() and not overwrite:
+        src0, url0 = candidates[0]
         _progress("download_skip", doi=doi, file=str(dest))
-        return {
-            "doi": doi,
-            "success": True,
-            "source": source,
-            "pdf_url": pdf_url,
-            "file": str(dest),
-            "meta": meta or {},
-            "sources_tried": sources_tried,
-            "skipped": True,
-            "skip_reason": "file_exists",
-        }
+        return _success(src0, url0, {"skipped": True, "skip_reason": "file_exists"})
 
-    dl_err = _download(pdf_url, dest, timeout=timeout)
-    if dl_err is None:
-        _progress("download_ok", doi=doi, file=str(dest))
-        return {
-            "doi": doi,
-            "success": True,
-            "source": source,
-            "pdf_url": pdf_url,
-            "file": str(dest),
-            "meta": meta or {},
-            "sources_tried": sources_tried,
-        }
+    # --- Fallback download loop ---
+    for cand_src, cand_url in candidates:
+        dl_err = _download(cand_url, dest, timeout=timeout)
+        if dl_err is None:
+            _progress("download_ok", doi=doi, file=str(dest), source=cand_src)
+            return _success(cand_src, cand_url, {"candidates": [{"source": s, "url": u} for s, u in candidates]})
+        download_errors.append({"source": cand_src, "url": cand_url, "reason": dl_err})
+        if dl_err in FATAL_DL_ERRORS:
+            break
 
-    retryable = dl_err in ("network_error", "size_exceeded", "io_error")
-    return {
-        "doi": doi,
-        "success": False,
-        "source": source,
-        "pdf_url": pdf_url,
-        "file": None,
-        "meta": meta or {},
-        "sources_tried": sources_tried,
-        "error": {
-            "code": f"download_{dl_err}",
-            "message": f"Download failed from {source}: {dl_err}",
-            "retryable": retryable,
-        },
-    }
+    return _download_failure(doi, meta, sources_tried, download_errors, candidates=candidates)
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +724,7 @@ def build_schema() -> dict:
         "command": "paper-fetch",
         "cli_version": CLI_VERSION,
         "schema_version": SCHEMA_VERSION,
-        "description": "Fetch legal open-access PDFs by DOI via Unpaywall, Semantic Scholar, arXiv, PMC, and bioRxiv/medRxiv.",
+        "description": "Fetch legal open-access PDFs by DOI via Unpaywall, Semantic Scholar, arXiv, Europe PMC, PMC, and bioRxiv/medRxiv. On download failure (host_not_allowed, not_a_pdf, network_error), automatically falls back to the next candidate source.",
         "subcommands": {
             "schema": "Print this schema as JSON and exit (no network).",
         },
