@@ -18,7 +18,8 @@ Fetch the legal open-access PDF for a paper given a DOI (or title). Tries multip
 3. **arXiv** — if `externalIds.ArXiv` present, `https://arxiv.org/pdf/{arxiv_id}.pdf`
 4. **PubMed Central OA** — if PMCID present, `https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/`
 5. **bioRxiv / medRxiv** — if DOI prefix is `10.1101`, query `https://api.biorxiv.org/details/{server}/{doi}` for the latest version PDF URL
-6. Otherwise → report failure with title/authors so the user can request via ILL
+6. **Publisher direct** *(institutional mode only — `PAPER_FETCH_INSTITUTIONAL=1`)* — last-resort DOI-prefix → publisher PDF template (Nature / Science / Wiley / Springer / ACS / PNAS / NEJM / Sage / T&F / Elsevier). The caller's own subscription IP / cookies / EZproxy are what authorize the fetch; unauthorized responses fail the `%PDF` check and fall through to step 7.
+7. Otherwise → report failure with title/authors so the user can request via ILL
 
 If only a title is given, resolve to a DOI first via Semantic Scholar `search_paper_by_title` (asta MCP) or Crossref.
 
@@ -247,7 +248,7 @@ python scripts/fetch.py 10.1038/s41586-020-2649-2
 
 Many researchers have legitimate subscription access through their institution's IP range (on-campus or VPN). Paper-fetch can use that access honestly — it does not bypass paywalls, it just lets the publisher's own auth (your IP, your session cookies) decide whether to serve the PDF.
 
-Host reachability does not differ between modes — public mode already trusts URLs returned by the OA APIs (Unpaywall, Semantic Scholar, bioRxiv, PMC) and fetches any HTTPS host that passes SSRF defense. Institutional mode's purpose is the **rate limiter** — when a batch of DOIs resolves to publisher domains protected by your institutional subscription, 1 req/s keeps your IP from being throttled or banned for "systematic downloading."
+Host reachability does not differ between modes — public mode already trusts URLs returned by the OA APIs (Unpaywall, Semantic Scholar, bioRxiv, PMC) and fetches any HTTPS host that passes SSRF defense. Institutional mode adds two things: (1) a **publisher-direct fallback** (step 6 above) that constructs a publisher-side PDF URL by DOI prefix when every OA source missed, so your institutional IP/cookies can authorize the fetch, and (2) a **1 req/s rate limiter** to keep batch jobs from getting your IP throttled or banned for "systematic downloading."
 
 **Opt in:** `export PAPER_FETCH_INSTITUTIONAL=1`
 
@@ -257,6 +258,7 @@ Host reachability does not differ between modes — public mode already trusts U
 |---|---|---|
 | Host reachability | Any public HTTPS host passing SSRF defense | Same |
 | SSRF defense | Enforced (private IP / non-http(s) / non-80,443 / cloud metadata all blocked) | Enforced — same rules |
+| Publisher-direct fallback | Off | On — DOI-prefix → publisher PDF URL, last resort after all OA sources miss |
 | Rate limit | None | 1 req/s token bucket (all outbound) |
 | `meta.auth_mode` | `"public"` | `"institutional"` |
 

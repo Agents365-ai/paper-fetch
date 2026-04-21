@@ -40,8 +40,8 @@ from pathlib import Path
 # Versioning
 # ---------------------------------------------------------------------------
 
-CLI_VERSION = "0.9.0"
-SCHEMA_VERSION = "1.5.0"
+CLI_VERSION = "0.10.0"
+SCHEMA_VERSION = "1.6.0"
 
 # ---------------------------------------------------------------------------
 # Config
@@ -487,6 +487,62 @@ def try_biorxiv(doi: str, *, timeout: int) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Publisher-direct fallback (institutional mode only)
+# ---------------------------------------------------------------------------
+# When the five OA sources all miss and the operator has opted into
+# institutional mode, construct a publisher-side PDF URL by DOI prefix.
+# The caller's IP / subscription cookies / EZproxy determine whether the
+# publisher actually serves the PDF; unauthorized responses (401/403 or an
+# HTML login page) fail the %PDF magic-byte check and the envelope surfaces
+# download_not_a_pdf. SSRF + 50 MB + 1 req/s rate limit still apply.
+
+_PUBLISHER_DIRECT_TEMPLATES: dict[str, tuple[str, str]] = {
+    # DOI prefix -> (publisher label, URL template).
+    # {doi} = full DOI; {suffix} = part after the prefix.
+    "10.1038/": ("nature", "https://www.nature.com/articles/{suffix}.pdf"),
+    "10.1126/": ("science", "https://www.science.org/doi/pdf/{doi}"),
+    "10.1002/": ("wiley", "https://onlinelibrary.wiley.com/doi/pdf/{doi}"),
+    "10.1007/": ("springer", "https://link.springer.com/content/pdf/{doi}.pdf"),
+    "10.1021/": ("acs", "https://pubs.acs.org/doi/pdf/{doi}"),
+    "10.1073/": ("pnas", "https://www.pnas.org/doi/pdf/{doi}"),
+    "10.1056/": ("nejm", "https://www.nejm.org/doi/pdf/{doi}"),
+    "10.1177/": ("sage", "https://journals.sagepub.com/doi/pdf/{doi}"),
+    "10.1080/": ("tandf", "https://www.tandfonline.com/doi/pdf/{doi}"),
+    # 10.1016/ (Elsevier / Cell Press) needs PII lookup — handled separately below.
+}
+
+
+def _try_publisher_direct(doi: str, *, timeout: int) -> tuple[str | None, str | None]:
+    """Construct a publisher-side direct PDF URL by DOI prefix.
+
+    Returns (url, publisher_label) or (None, None) if no template matches.
+    Does not itself check whether the user is authorized — the actual HTTP
+    fetch will reveal that via 401/403 or an HTML response.
+    """
+    if doi.startswith("10.1016/"):
+        # Elsevier: resolve DOI -> PII via Crossref, then build sciencedirect URL.
+        try:
+            data = _get_json(f"https://api.crossref.org/works/{doi}", timeout=timeout)
+        except Exception:
+            return None, None
+        ids = (data.get("message") or {}).get("alternative-id") or []
+        pii = next(
+            (i for i in ids if isinstance(i, str) and i.startswith("S") and len(i) >= 16),
+            None,
+        )
+        if not pii:
+            return None, None
+        return f"https://www.sciencedirect.com/science/article/pii/{pii}/pdfft", "elsevier"
+
+    for prefix, (label, tmpl) in _PUBLISHER_DIRECT_TEMPLATES.items():
+        if doi.startswith(prefix):
+            suffix = doi[len(prefix):]
+            return tmpl.format(doi=doi, suffix=suffix), label
+
+    return None, None
+
+
+# ---------------------------------------------------------------------------
 # Core fetch logic
 # ---------------------------------------------------------------------------
 
@@ -705,6 +761,19 @@ def fetch(
         else:
             _progress("source_miss", doi=doi, source="biorxiv")
 
+    # --- Publisher-direct fallback (institutional mode only, last resort) ---
+    # Runs only when the operator has opted into institutional mode. The
+    # caller's IP / cookies / EZproxy are what actually authorize the fetch.
+    if _is_institutional():
+        _progress("source_try", doi=doi, source="publisher_direct")
+        pub_url, pub_label = _try_publisher_direct(doi, timeout=timeout)
+        if pub_url:
+            sources_tried.append("publisher_direct")
+            _progress("source_hit", doi=doi, source="publisher_direct", pdf_url=pub_url, publisher=pub_label)
+            _add("publisher_direct", pub_url)
+        else:
+            _progress("source_miss", doi=doi, source="publisher_direct", reason="no_template_for_doi_prefix")
+
     # --- Exhausted all sources with no candidates and no prior attempts → not_found ---
     if not candidates and not download_errors:
         _progress("not_found", doi=doi)
@@ -799,7 +868,7 @@ def build_schema() -> dict:
         "command": "paper-fetch",
         "cli_version": CLI_VERSION,
         "schema_version": SCHEMA_VERSION,
-        "description": "Fetch legal open-access PDFs by DOI via Unpaywall, Semantic Scholar, arXiv, Europe PMC, PMC, and bioRxiv/medRxiv. On download failure (host_not_allowed, not_a_pdf, network_error), automatically falls back to the next candidate source.",
+        "description": "Fetch legal open-access PDFs by DOI via Unpaywall, Semantic Scholar, arXiv, Europe PMC, PMC, and bioRxiv/medRxiv. In institutional mode (PAPER_FETCH_INSTITUTIONAL=1), also attempts a publisher-direct fetch (publisher_direct source) as a last resort — the caller's own subscription IP / cookies / EZproxy must grant access. On download failure (host_not_allowed, not_a_pdf, network_error), automatically falls back to the next candidate source.",
         "subcommands": {
             "schema": "Print this schema as JSON and exit (no network).",
         },
