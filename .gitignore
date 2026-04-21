@@ -15,6 +15,9 @@ pdfs/
 # Tests
 tests/
 
+# Internal planning docs (not part of the published skill)
+plan/
+
 # OS cruft
 .DS_Store
 Thumbs.db
