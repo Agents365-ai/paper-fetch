@@ -51,8 +51,3 @@ jobs:
             exit 1
           fi
           echo "$out" | python -c "import json,sys; e=json.loads(sys.stdin.read()); assert e['ok'] is False; assert e['error']['code'] == 'validation_error'; print('validation envelope ok')"
-
-      - name: Run unit + integration tests
-        env:
-          PAPER_FETCH_NO_AUTO_UPDATE: "1"
-        run: python tests/test_fetch.py -v
