@@ -40,8 +40,8 @@ from pathlib import Path
 # Versioning
 # ---------------------------------------------------------------------------
 
-CLI_VERSION = "0.8.0"
-SCHEMA_VERSION = "1.4.0"
+CLI_VERSION = "0.9.0"
+SCHEMA_VERSION = "1.5.0"
 
 # ---------------------------------------------------------------------------
 # Config
@@ -82,61 +82,6 @@ RETRY_AFTER_HOURS = {
     "download_size_exceeded": 24,  # publisher posted a >50 MB PDF; revisit in a day
     "download_io_error": 1,        # local disk full / permission blip
 }
-
-_BASE_ALLOWED_HOSTS = {
-    "api.unpaywall.org",
-    "unpaywall.org",
-    "arxiv.org",
-    "www.ncbi.nlm.nih.gov",
-    "pmc.ncbi.nlm.nih.gov",
-    "api.semanticscholar.org",
-    "api.biorxiv.org",
-    "www.biorxiv.org",
-    "www.medrxiv.org",
-    "europepmc.org",
-    "www.ebi.ac.uk",
-    "ftp.ebi.ac.uk",
-    "www.nature.com",
-    "link.springer.com",
-    "journals.plos.org",
-    "elifesciences.org",
-    "www.cell.com",
-    "www.science.org",
-    "academic.oup.com",
-    "pubs.acs.org",
-    "onlinelibrary.wiley.com",
-    "www.frontiersin.org",
-    "www.mdpi.com",
-    "peerj.com",
-    "royalsocietypublishing.org",
-    "www.pnas.org",
-    "proceedings.mlr.press",
-    "openreview.net",
-    "dl.acm.org",
-    "ieeexplore.ieee.org",
-    # Additional OA publishers encountered in practice
-    "iv.iiarjournals.org",
-    "ar.iiarjournals.org",
-    "cgp.iiarjournals.org",
-    "aacrjournals.org",
-    "www.spandidos-publications.com",
-    "www.karger.com",
-    "www.thieme-connect.de",
-    "www.liebertpub.com",
-    "www.hindawi.com",
-    "www.dovepress.com",
-    "bmcmedicine.biomedcentral.com",
-    "www.aging-us.com",
-}
-
-
-def _allowed_hosts() -> set[str]:
-    extra = os.environ.get("PAPER_FETCH_ALLOWED_HOSTS", "").strip()
-    if not extra:
-        return _BASE_ALLOWED_HOSTS
-    more = {h.strip().lower() for h in extra.split(",") if h.strip()}
-    return _BASE_ALLOWED_HOSTS | more
-
 
 # ---------------------------------------------------------------------------
 # Institutional mode
@@ -389,23 +334,14 @@ def _get_json(url: str, *, timeout: int):
 def _is_allowed_host(url: str) -> bool:
     """Gatekeeper for any outbound PDF fetch.
 
-    Layered:
-      1. SSRF defense runs first — applies in ALL modes. Blocks private IPs,
-         non-http(s) schemes, non-80/443 ports, cloud metadata hostnames.
-      2. Public mode additionally requires the hostname to be in the curated
-         OA allowlist (plus any PAPER_FETCH_ALLOWED_HOSTS extensions).
-      3. Institutional mode trusts the operator's opt-in — any public HTTPS
-         host passing the SSRF check is allowed. The user's own subscription
-         (IP range / cookies) determines whether the publisher actually
-         serves the PDF.
+    Only SSRF defense applies — private IPs, non-http(s) schemes, non-80/443
+    ports, and cloud metadata hostnames are rejected. Everything else is
+    allowed: the skill trusts URLs returned by the OA APIs it already called
+    (Unpaywall, Semantic Scholar, bioRxiv, PMC), and the %PDF magic-byte +
+    50 MB size checks in `_download` catch tampered responses.
     """
     ok, _reason = _is_safe_url(url)
-    if not ok:
-        return False
-    if _is_institutional():
-        return True
-    host = (urllib.parse.urlparse(url).hostname or "").lower()
-    return host in _allowed_hosts()
+    return ok
 
 
 def _download(url: str, dest: Path, *, timeout: int) -> str | None:
@@ -941,7 +877,7 @@ def build_schema() -> dict:
             "not_found": {"retryable": True, "retry_after_hours": RETRY_AFTER_HOURS["not_found"], "message": "No OA PDF found anywhere; OA availability changes over time"},
             "download_network_error": {"retryable": True, "retry_after_hours": RETRY_AFTER_HOURS["download_network_error"], "message": "Network failure during download"},
             "download_not_a_pdf": {"retryable": False, "message": "Response was not a PDF (HTML landing page)"},
-            "download_host_not_allowed": {"retryable": False, "message": "PDF URL host not in allowlist"},
+            "download_host_not_allowed": {"retryable": False, "message": "PDF URL failed SSRF safety check (private IP, non-http(s) scheme, non-80/443 port, or blocked metadata host)"},
             "download_size_exceeded": {"retryable": True, "retry_after_hours": RETRY_AFTER_HOURS["download_size_exceeded"], "message": f"Response exceeded {MAX_PDF_SIZE // (1024*1024)} MB limit"},
             "download_io_error": {"retryable": True, "retry_after_hours": RETRY_AFTER_HOURS["download_io_error"], "message": "Local filesystem write failed"},
             "internal_error": {"retryable": False, "message": "Unexpected error"},
@@ -956,13 +892,12 @@ def build_schema() -> dict:
             "latency_ms": "Wall-clock time from process start to this emit.",
             "schema_version": "Version of this schema contract; bumped on any additive or breaking change.",
             "cli_version": "Version of the paper-fetch binary that produced the envelope.",
-            "auth_mode": "Either 'public' (OA-only, curated allowlist) or 'institutional' (user opted in via PAPER_FETCH_INSTITUTIONAL=1; hostname policy open, rate-limited).",
+            "auth_mode": "Either 'public' (OA sources, no client rate limit) or 'institutional' (user opted in via PAPER_FETCH_INSTITUTIONAL=1; 1 req/s rate limit to protect the operator's IP from publisher-side throttling).",
             "sources_tried": "Union of sources consulted across all DOIs in this run.",
         },
         "env": {
             "UNPAYWALL_EMAIL": "Optional. Contact email for Unpaywall API. If unset, Unpaywall is skipped.",
-            "PAPER_FETCH_ALLOWED_HOSTS": "Optional. Comma-separated hostnames to extend the public-mode OA allowlist. Not needed in institutional mode.",
-            "PAPER_FETCH_INSTITUTIONAL": "Optional. Set to any value to opt into institutional mode: hostname allowlist is lifted (SSRF defense still enforced), rate limiter activates at 1 req/s. Intended for callers whose IP / cookies / EZproxy already grant legitimate subscription access. Does not bypass paywalls.",
+            "PAPER_FETCH_INSTITUTIONAL": "Optional. Set to any value to opt into institutional mode: activates a 1 req/s rate limiter to protect the operator's IP from publisher-side throttling. Intended for callers whose IP / cookies / EZproxy already grant legitimate subscription access. Does not bypass paywalls. SSRF defense applies in every mode.",
             "PAPER_FETCH_NO_AUTO_UPDATE": "Optional. Set to any value to disable silent background self-update.",
             "PAPER_FETCH_UPDATE_INTERVAL": "Optional. Cooldown in seconds between update checks. Default 86400.",
         },

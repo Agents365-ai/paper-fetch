@@ -195,7 +195,7 @@ Every retryable error carries a `retry_after_hours` hint in the error object, so
 | `not_found` | No open-access PDF found | Yes | `168` (one week — OA lands on embargo / preprint timescale) |
 | `download_network_error` | Network failure during download | Yes | `1` |
 | `download_not_a_pdf` | Response was not a PDF (HTML landing page) | No | — |
-| `download_host_not_allowed` | PDF URL host not in allowlist | No | — |
+| `download_host_not_allowed` | PDF URL failed SSRF safety check (private IP / non-http(s) / non-80,443 / blocked metadata host) | No | — |
 | `download_size_exceeded` | Response exceeded 50 MB limit | Yes | `24` |
 | `download_io_error` | Local filesystem write failed | Yes | `1` |
 | `internal_error` | Unexpected error | No | — |
@@ -239,14 +239,15 @@ python scripts/fetch.py 10.1038/s41586-020-2649-2
 | Variable | Default | Purpose |
 |---|---|---|
 | `UNPAYWALL_EMAIL` | unset | Contact email for Unpaywall API. Optional but recommended. Without it, Unpaywall is skipped (remaining 4 sources still work). |
-| `PAPER_FETCH_ALLOWED_HOSTS` | unset | Comma-separated extra hostnames to extend the public-mode OA allowlist. Not needed in institutional mode. |
-| `PAPER_FETCH_INSTITUTIONAL` | unset | Set to any value (e.g. `1`) to opt into **institutional mode** — lifts the hostname allowlist and activates a 1 req/s rate limiter. See below. |
+| `PAPER_FETCH_INSTITUTIONAL` | unset | Set to any value (e.g. `1`) to opt into **institutional mode** — activates a 1 req/s rate limiter to protect the operator's IP from publisher-side throttling. See below. |
 | `PAPER_FETCH_NO_AUTO_UPDATE` | unset | Set to any value to disable silent background self-update |
 | `PAPER_FETCH_UPDATE_INTERVAL` | `86400` | Cooldown in seconds between update checks |
 
 ## Institutional access (opt-in)
 
-Many researchers have legitimate subscription access through their institution's IP range (on-campus or VPN). Paper-fetch can use that access honestly — it does not bypass paywalls, it just stops blocking publisher hostnames that aren't in the OA allowlist and lets the publisher's own auth (your IP, your session cookies) decide whether to serve the PDF.
+Many researchers have legitimate subscription access through their institution's IP range (on-campus or VPN). Paper-fetch can use that access honestly — it does not bypass paywalls, it just lets the publisher's own auth (your IP, your session cookies) decide whether to serve the PDF.
+
+Host reachability does not differ between modes — public mode already trusts URLs returned by the OA APIs (Unpaywall, Semantic Scholar, bioRxiv, PMC) and fetches any HTTPS host that passes SSRF defense. Institutional mode's purpose is the **rate limiter** — when a batch of DOIs resolves to publisher domains protected by your institutional subscription, 1 req/s keeps your IP from being throttled or banned for "systematic downloading."
 
 **Opt in:** `export PAPER_FETCH_INSTITUTIONAL=1`
 
@@ -254,9 +255,9 @@ Many researchers have legitimate subscription access through their institution's
 
 | Aspect | Public (default) | Institutional |
 |---|---|---|
-| Hostname policy | Must be in curated OA allowlist (or `PAPER_FETCH_ALLOWED_HOSTS`) | Any public HTTPS host allowed |
+| Host reachability | Any public HTTPS host passing SSRF defense | Same |
 | SSRF defense | Enforced (private IP / non-http(s) / non-80,443 / cloud metadata all blocked) | Enforced — same rules |
-| Rate limit | None (OA sources are unmetered) | 1 req/s token bucket (all sources) |
+| Rate limit | None | 1 req/s token bucket (all outbound) |
 | `meta.auth_mode` | `"public"` | `"institutional"` |
 
 **What stays the same:**
@@ -273,7 +274,7 @@ Many researchers have legitimate subscription access through their institution's
 ## Notes
 
 - **Auth is delegated.** The agent never runs a login subcommand. The human or the orchestrator sets `UNPAYWALL_EMAIL` in the environment; the agent inherits it. Missing email degrades gracefully to the remaining 4 sources.
-- **Trust is directional.** CLI arguments are validated once at the entry point. The host allowlist and 50 MB size cap are enforced in the environment layer, not at the agent's request. An agent cannot loosen safety by passing a flag — only by the operator setting `PAPER_FETCH_ALLOWED_HOSTS`.
+- **Trust is directional.** CLI arguments are validated once at the entry point. SSRF defense, the `%PDF` magic-byte check, and the 50 MB size cap are enforced in the environment layer, not at the agent's request. An agent cannot loosen safety by passing a flag — opting into institutional mode (and its rate-limit risk profile) is an operator action via environment variable.
 - **Downloads are naturally idempotent.** Re-running against the same `--out` skips files that already exist (deterministic filename: `{first_author}_{year}_{short_title}.pdf`). Pair with `--idempotency-key` to also replay the exact envelope without any network I/O.
 - **Never bypasses paywalls.** Optionally uses the caller's own institutional subscription (via IP, cookies, or EZproxy) when explicitly enabled via `PAPER_FETCH_INSTITUTIONAL=1`. If no OA copy exists and no institutional access is available, the skill reports failure honestly — do not suggest Sci-Hub or similar.
 - **Default output directory:** `./pdfs/`.

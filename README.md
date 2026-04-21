@@ -235,7 +235,7 @@ Or just ask your agent naturally:
 - **Coverage depends on OA availability** — if a paper has no legal OA copy, this skill cannot get it. That is a feature, not a bug.
 - **Some publisher redirects** return an HTML landing page instead of a PDF; the script validates the `%PDF` header and fails cleanly in that case
 - **No authentication** — institutional proxies (EZproxy / OpenAthens) are not supported in this version
-- **Host allowlist** — downloads are restricted to known OA provider domains; PDFs from unlisted hosts are blocked
+- **SSRF defense** — every outbound fetch rejects private IPs, non-http(s) schemes, non-80/443 ports, and cloud-metadata hostnames
 - **50 MB size limit** — per-PDF download cap to prevent runaway downloads
 
 ## License
