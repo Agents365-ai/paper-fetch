@@ -11,7 +11,6 @@
 - **Batch mode** — pass a file of DOIs with `--batch`, or pipe them in with `--batch -`
 - **Agent-native** — stable JSON envelope on stdout, NDJSON progress on stderr, machine-readable `schema` subcommand, TTY-aware format default, idempotent retries via `--idempotency-key`, typed exit codes (`0`/`1`/`3`/`4`), partial-success batches with `next` retry hints
 - **Safely retriable** — re-running skips already-downloaded files; `--idempotency-key` replays the exact envelope without any network I/O
-- **Never bypasses paywalls** — if no OA copy exists, reports failure with metadata so you can go through ILL
 - **Self-updating** — when installed via `git clone`, each invocation spawns a detached background `git pull --ff-only` (throttled to once per 24h). Zero user action required. Disable with `export PAPER_FETCH_NO_AUTO_UPDATE=1`.
 
 ## Discipline Coverage
@@ -26,7 +25,7 @@
 | **PubMed Central** | Biomedical only |
 | **bioRxiv / medRxiv** | Biology / medicine preprints only |
 
-In practice, **Unpaywall + Semantic Scholar alone cover OA papers in chemistry, materials, economics, psychology, humanities, and every other field** via institutional repositories, SSRN, RePEc, and publisher-hosted OA copies. arXiv/PMC/bioRxiv are additional fallbacks for their specific domains. If no legal OA copy exists anywhere, the skill reports failure honestly — it will **never** bypass paywalls regardless of discipline.
+In practice, **Unpaywall + Semantic Scholar alone cover OA papers in chemistry, materials, economics, psychology, humanities, and every other field** via institutional repositories, SSRN, RePEc, and publisher-hosted OA copies. arXiv/PMC/bioRxiv are additional fallbacks for their specific domains.
 
 ## Multi-Platform Support
 
@@ -56,7 +55,6 @@ Works with all major AI coding agents that support the Agent Skills format:
 | Structured output | No | Stable JSON envelope + NDJSON progress |
 | Idempotent retries | No | `--idempotency-key` replays cached envelope |
 | Typed exit codes | No | `0`/`1`/`3`/`4` — orchestrator can route failures |
-| Legal-only guarantee | None | Hard refuses paywall bypass |
 | Dependencies | Varies | Python stdlib only |
 
 ## Prerequisites
@@ -232,7 +230,6 @@ Or just ask your agent naturally:
 
 ## Known Limitations
 
-- **Coverage depends on OA availability** — if a paper has no legal OA copy, this skill cannot get it. That is a feature, not a bug.
 - **Some publisher redirects** return an HTML landing page instead of a PDF; the script validates the `%PDF` header and fails cleanly in that case
 - **No authentication** — institutional proxies (EZproxy / OpenAthens) are not supported in this version
 - **SSRF defense** — every outbound fetch rejects private IPs, non-http(s) schemes, non-80/443 ports, and cloud-metadata hostnames

@@ -1,6 +1,6 @@
 ---
 name: paper-fetch
-description: Use when the user wants to download a paper PDF from a DOI (or title, resolved to a DOI first) via legal open-access sources. Tries Unpaywall, arXiv, bioRxiv/medRxiv, PubMed Central, and Semantic Scholar in order.
+description: Use when the user wants to download a paper PDF from a DOI (or title, resolved to a DOI first). Tries Unpaywall, arXiv, bioRxiv/medRxiv, PubMed Central, and Semantic Scholar in order.
 homepage: https://github.com/Agents365-ai/paper-fetch
 metadata: {"openclaw":{"requires":{"bins":["python3"]},"emoji":"📄"},"pimo":{"category":"research","tags":["paper","pdf","doi","open-access","download"]}}
 ---
@@ -246,7 +246,7 @@ python scripts/fetch.py 10.1038/s41586-020-2649-2
 
 ## Institutional access (opt-in)
 
-Many researchers have legitimate subscription access through their institution's IP range (on-campus or VPN). Paper-fetch can use that access honestly — it does not bypass paywalls, it just lets the publisher's own auth (your IP, your session cookies) decide whether to serve the PDF.
+Many researchers have legitimate subscription access through their institution's IP range (on-campus or VPN). Paper-fetch can use that access by letting the publisher's own auth (your IP, your session cookies) decide whether to serve the PDF.
 
 Host reachability does not differ between modes — public mode already trusts URLs returned by the OA APIs (Unpaywall, Semantic Scholar, bioRxiv, PMC) and fetches any HTTPS host that passes SSRF defense. Institutional mode adds two things: (1) a **publisher-direct fallback** (step 6 above) that constructs a publisher-side PDF URL by DOI prefix when every OA source missed, so your institutional IP/cookies can authorize the fetch, and (2) a **1 req/s rate limiter** to keep batch jobs from getting your IP throttled or banned for "systematic downloading."
 
@@ -278,7 +278,7 @@ Host reachability does not differ between modes — public mode already trusts U
 - **Auth is delegated.** The agent never runs a login subcommand. The human or the orchestrator sets `UNPAYWALL_EMAIL` in the environment; the agent inherits it. Missing email degrades gracefully to the remaining 4 sources.
 - **Trust is directional.** CLI arguments are validated once at the entry point. SSRF defense, the `%PDF` magic-byte check, and the 50 MB size cap are enforced in the environment layer, not at the agent's request. An agent cannot loosen safety by passing a flag — opting into institutional mode (and its rate-limit risk profile) is an operator action via environment variable.
 - **Downloads are naturally idempotent.** Re-running against the same `--out` skips files that already exist (deterministic filename: `{first_author}_{year}_{journal_abbrev}_{short_title}.pdf`; the journal segment is omitted if metadata lacks a journal/venue). Pair with `--idempotency-key` to also replay the exact envelope without any network I/O.
-- **Never bypasses paywalls.** Optionally uses the caller's own institutional subscription (via IP, cookies, or EZproxy) when explicitly enabled via `PAPER_FETCH_INSTITUTIONAL=1`. If no OA copy exists and no institutional access is available, the skill reports failure honestly.
+- **Institutional mode** is opt-in via `PAPER_FETCH_INSTITUTIONAL=1` and uses the caller's own subscription (IP, cookies, or EZproxy).
 - **Default output directory:** `./pdfs/`.
 
 ## Auto-update

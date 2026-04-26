@@ -11,7 +11,6 @@
 - **批量模式**：`--batch` 传入 DOI 列表文件，或用 `--batch -` 从 stdin 管道读入
 - **Agent 原生** — stdout 输出稳定的 JSON 信封，stderr 输出 NDJSON 进度事件，提供机器可读的 `schema` 子命令，`--format` 自动识别 TTY，通过 `--idempotency-key` 支持幂等重试，退出码分类（`0`/`1`/`3`/`4`），批量部分失败时输出带 `next` 重试提示的 `ok: "partial"` 信封
 - **安全可重试** — 重复运行会跳过已下载文件；`--idempotency-key` 直接复用原信封，无任何网络 I/O
-- **不绕过付费墙** — 没有 OA 版本时会报告失败并输出元数据，便于走馆际互借
 - **自动更新** — 通过 `git clone` 安装时，每次调用会后台 detach 一个 `git pull --ff-only`（24 小时内至多一次）。无需用户任何操作。禁用：`export PAPER_FETCH_NO_AUTO_UPDATE=1`。
 
 ## 学科覆盖
@@ -26,7 +25,7 @@
 | **PubMed Central** | 仅生物医学 |
 | **bioRxiv / medRxiv** | 仅生物/医学预印本 |
 
-实际使用中，**仅 Unpaywall + Semantic Scholar 两个源就足以覆盖化学、材料、经济、心理学、人文社科等任何领域的 OA 论文** —— 它们会自动命中机构知识库、SSRN、RePEc 以及出版商自托管的 OA 版本。arXiv/PMC/bioRxiv 只是针对各自领域的额外回退。若论文确实没有任何合法 OA 版本，skill 会如实报告失败 —— 按设计**绝不**绕过付费墙，任何学科都一视同仁。
+实际使用中，**仅 Unpaywall + Semantic Scholar 两个源就足以覆盖化学、材料、经济、心理学、人文社科等任何领域的 OA 论文** —— 它们会自动命中机构知识库、SSRN、RePEc 以及出版商自托管的 OA 版本。arXiv/PMC/bioRxiv 只是针对各自领域的额外回退。
 
 ## 多平台支持
 
@@ -54,7 +53,6 @@
 | 结构化输出 | 无 | 稳定 JSON 信封 + stderr NDJSON 进度 |
 | 幂等重试 | 无 | `--idempotency-key` 复用原信封 |
 | 退出码分类 | 无 | `0`/`1`/`3`/`4` — orchestrator 可按类路由失败 |
-| 合法来源保证 | 无 | 硬性拒绝付费墙绕过 |
 | 依赖 | 各异 | 仅 Python 标准库 |
 
 ## 环境要求
@@ -219,7 +217,6 @@ python scripts/fetch.py --batch dois.txt --stream
 
 ## 已知限制
 
-- **覆盖率取决于 OA 可用性** — 没有合法 OA 版本的论文本 skill 无法获取，这是刻意设计
 - **部分出版社重定向**返回 HTML 落地页而非 PDF，脚本会校验 `%PDF` 头并优雅失败
 - **不支持机构代理**（EZproxy / OpenAthens）
 - **SSRF 防御** — 每次出站请求都会拒绝私网 IP、非 http(s)、非 80/443 端口、云元数据主机名
