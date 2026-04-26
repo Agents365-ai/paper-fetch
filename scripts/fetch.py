@@ -111,6 +111,21 @@ SCIHUB_DEFAULT_MIRRORS = (
 )
 SCIHUB_DISCOVERY_URL = "https://www.sci-hub.pub/"
 
+# Mobile Safari UA for Sci-Hub HTML page fetches. Mobile clients tend to
+# get a simpler page layout less likely to trigger CAPTCHA. Technique
+# borrowed from ethanwillis/zotero-scihub.
+SCIHUB_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+    "Version/17.4 Mobile/15E148 Safari/604.1"
+)
+
+# Polite per-host pacing for Sci-Hub mirror requests. Public OA APIs are
+# unmetered; Sci-Hub mirrors throttle and CAPTCHA aggressively, so we pace
+# Sci-Hub fetches independently of institutional mode.
+SCIHUB_RATE_PER_SEC = 1.0
+_last_scihub_request_monotonic: float = 0.0
+
 # Hostnames blocked in every mode. Covers two threat classes:
 #   - loopback aliases that resolve to 127.0.0.1 / ::1 but pass the IP literal
 #     check (the ip literal check only fires when the URL host IS an IP)
@@ -340,15 +355,27 @@ def _envelope_err(code: str, message: str, *, retryable: bool = False, **ctx) ->
 # ---------------------------------------------------------------------------
 
 
-def _get(url: str, *, accept: str = "application/json", timeout: int) -> bytes:
+def _get(url: str, *, accept: str = "application/json", timeout: int, user_agent: str | None = None) -> bytes:
     _rate_limit_gate()
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept})
+    req = urllib.request.Request(url, headers={"User-Agent": user_agent or UA, "Accept": accept})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 
 
 def _get_json(url: str, *, timeout: int):
     return json.loads(_get(url, timeout=timeout).decode("utf-8"))
+
+
+def _scihub_rate_gate() -> None:
+    """1 req/s pacing for Sci-Hub fetches, applied in every auth mode."""
+    global _last_scihub_request_monotonic
+    min_interval = 1.0 / SCIHUB_RATE_PER_SEC
+    now = time.monotonic()
+    wait = _last_scihub_request_monotonic + min_interval - now
+    if wait > 0:
+        time.sleep(wait)
+        now = time.monotonic()
+    _last_scihub_request_monotonic = now
 
 
 def _is_allowed_host(url: str) -> bool:
@@ -649,13 +676,14 @@ def _scihub_is_not_in_corpus(html: str) -> bool:
     return any(p.search(html) for p in _SCIHUB_NOT_IN_CORPUS_PATTERNS)
 
 
-def _scihub_extract_iframe(html: str) -> str | None:
+def _scihub_extract_iframe(html: str, mirror_host: str | None = None) -> str | None:
     """Extract the embedded PDF URL from a Sci-Hub paper page.
 
     Sci-Hub returns an HTML page with an <iframe src="...pdf"> (or sometimes
     an <embed src="...pdf">) pointing at the actual PDF on a CDN. Returns
     the absolute https:// URL, or None if no embed found (CAPTCHA, missing
-    paper, or layout change).
+    paper, or layout change). When `mirror_host` is provided, path-relative
+    URLs (e.g. `/downloads/abc.pdf`) are resolved against it.
     """
     # Try the id="pdf" anchor first — stable across iframe/embed layouts.
     for pat in (_SCIHUB_PDF_ID_RE, _SCIHUB_IFRAME_RE, _SCIHUB_EMBED_RE):
@@ -667,10 +695,10 @@ def _scihub_extract_iframe(html: str) -> str | None:
             if url.startswith("//"):
                 url = "https:" + url
             elif url.startswith("/"):
-                # Relative to the mirror — we don't know which mirror produced
-                # this HTML here; skip. (In practice Sci-Hub PDF URLs are
-                # absolute or protocol-relative.)
-                continue
+                if not mirror_host:
+                    # No mirror context — caller will try another mirror.
+                    continue
+                url = f"https://{mirror_host}{url}"
             elif url.startswith("http://"):
                 url = "https://" + url[len("http://"):]
             return url
@@ -721,11 +749,17 @@ def try_scihub(doi: str, *, timeout: int) -> str | None:
         url = f"https://{host}/{doi}"
         if not _is_allowed_host(url):
             return None, "error"
+        _scihub_rate_gate()
         try:
-            html = _get(url, accept="text/html,application/xhtml+xml", timeout=timeout).decode("utf-8", "replace")
+            html = _get(
+                url,
+                accept="text/html,application/xhtml+xml",
+                timeout=timeout,
+                user_agent=SCIHUB_UA,
+            ).decode("utf-8", "replace")
         except Exception:
             return None, "error"
-        pdf = _scihub_extract_iframe(html)
+        pdf = _scihub_extract_iframe(html, mirror_host=host)
         if pdf:
             return pdf, "pdf"
         if _scihub_is_not_in_corpus(html):
