@@ -40,8 +40,8 @@ from pathlib import Path
 # Versioning
 # ---------------------------------------------------------------------------
 
-CLI_VERSION = "0.12.0"
-SCHEMA_VERSION = "1.8.0"
+CLI_VERSION = "0.13.0"
+SCHEMA_VERSION = "1.9.0"
 
 # ---------------------------------------------------------------------------
 # Config
@@ -723,12 +723,13 @@ def _scihub_discover_mirrors(*, timeout: int) -> list[str]:
     return found
 
 
-def try_scihub(doi: str, *, timeout: int) -> str | None:
+def try_scihub(doi: str, *, timeout: int) -> tuple[str, str] | None:
     """Resolve a DOI to a PDF URL via Sci-Hub mirrors.
 
     Tries the configured mirror list in order; on exhaustion, performs a
     one-shot discovery scan of SCIHUB_DISCOVERY_URL and tries any new
-    mirrors. Returns the absolute PDF URL or None if every mirror missed.
+    mirrors. Returns `(pdf_url, mirror_host)` on hit so the caller can
+    surface which mirror succeeded; returns None if every mirror missed.
 
     Short-circuits when a mirror explicitly reports the paper is not in
     Sci-Hub's database — every mirror shares one corpus, so cycling further
@@ -759,27 +760,27 @@ def try_scihub(doi: str, *, timeout: int) -> str | None:
             return None, "not_in_corpus"
         return None, "no_pdf"
 
-    def _walk(hosts: list[str]) -> tuple[str | None, bool]:
-        """Returns (pdf_url, gave_up). gave_up=True when a mirror confirmed not-in-corpus."""
+    def _walk(hosts: list[str]) -> tuple[tuple[str, str] | None, bool]:
+        """Returns ((pdf_url, mirror) | None, gave_up). gave_up=True on confirmed not-in-corpus."""
         for host in hosts:
             if host in tried:
                 continue
             tried.add(host)
             pdf, status = _try_one(host)
             if pdf:
-                return pdf, False
+                return (pdf, host), False
             if status == "not_in_corpus":
                 _progress("source_miss", source="scihub", reason="not_in_corpus", mirror=host)
                 return None, True
         return None, False
 
-    pdf, gave_up = _walk(mirrors)
-    if pdf or gave_up:
-        return pdf
+    hit, gave_up = _walk(mirrors)
+    if hit or gave_up:
+        return hit
 
     fresh = _scihub_discover_mirrors(timeout=timeout)
-    pdf, _ = _walk(fresh)
-    return pdf
+    hit, _ = _walk(fresh)
+    return hit
 
 
 # ---------------------------------------------------------------------------
@@ -905,6 +906,10 @@ def fetch(
     fname = _filename(meta or {"title": doi})
     dest = out_dir / fname
 
+    # Per-source diagnostics (mirror that succeeded, publisher label, etc.)
+    # surfaced in the result envelope under `source_detail`. Keyed by source label.
+    source_details: dict[str, dict] = {}
+
     def _success(src: str, url: str, extra: dict | None = None) -> dict:
         out = {
             "doi": doi,
@@ -915,6 +920,8 @@ def fetch(
             "meta": meta or {},
             "sources_tried": sources_tried,
         }
+        if src in source_details:
+            out["source_detail"] = source_details[src]
         if extra:
             out.update(extra)
         return out
@@ -1022,9 +1029,11 @@ def fetch(
     if _is_scihub_enabled() and not candidates and not download_errors:
         _progress("source_try", doi=doi, source="scihub")
         sources_tried.append("scihub")
-        sh_url = try_scihub(doi, timeout=timeout)
-        if sh_url:
-            _progress("source_hit", doi=doi, source="scihub", pdf_url=sh_url)
+        sh_hit = try_scihub(doi, timeout=timeout)
+        if sh_hit:
+            sh_url, sh_mirror = sh_hit
+            source_details["scihub"] = {"mirror": sh_mirror}
+            _progress("source_hit", doi=doi, source="scihub", pdf_url=sh_url, mirror=sh_mirror)
             _add("scihub", sh_url)
         else:
             _progress("source_miss", doi=doi, source="scihub")
@@ -1211,6 +1220,10 @@ def build_schema() -> dict:
             "partial": {"ok": "partial", "data": {"results": [], "summary": {}, "next": []}, "meta": {}},
             "failure": {"ok": False, "error": {"code": "", "message": "", "retryable": False}, "meta": {}},
         },
+        "result_fields": {
+            "source_detail": "Optional per-source diagnostics (e.g. {'mirror': 'sci-hub.ru'} when source='scihub'). Present only when the resolving source has additional context worth surfacing for orchestrator routing.",
+        },
+        "deprecations": [],
         "meta_fields": {
             "request_id": "Unique per-invocation id; correlates stderr progress events with the stdout envelope.",
             "latency_ms": "Wall-clock time from process start to this emit.",

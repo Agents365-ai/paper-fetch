@@ -1,6 +1,6 @@
 # OpenAI Codex sidecar configuration for paper-fetch
 name: paper-fetch
-version: 0.12.0
+version: 0.13.0
 description: Download paper PDFs by DOI (Unpaywall, Semantic Scholar, arXiv, PMC, bioRxiv/medRxiv, Sci-Hub mirrors).
 entry: SKILL.md
 
