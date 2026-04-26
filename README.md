@@ -9,7 +9,7 @@
 - **Zero dependencies** — pure Python standard library, no `pip install` needed
 - **Auto-named output** — `{first_author}_{year}_{journal_abbrev}_{short_title}.pdf` (journal omitted if unknown; multi-word journals get ISO-style initials, e.g. *Proceedings of the National Academy of Sciences* → `PNAS`)
 - **Batch mode** — pass a file of DOIs with `--batch`, or pipe them in with `--batch -`
-- **Agent-native** — stable JSON envelope on stdout, NDJSON progress on stderr, machine-readable `schema` subcommand, TTY-aware format default, idempotent retries via `--idempotency-key`, typed exit codes (`0`/`1`/`3`/`4`), partial-success batches with `next` retry hints
+- **Agent-native** — stable JSON envelope on stdout, NDJSON progress on stderr, machine-readable `schema` subcommand (with `deprecations` slot for forward-compat drift detection), TTY-aware format default, idempotent retries via `--idempotency-key`, typed exit codes (`0`/`1`/`3`/`4`), partial-success batches with `next` retry hints, per-source diagnostics in `result.source_detail` (e.g. which Sci-Hub mirror won, so an orchestrator can pin it via `PAPER_FETCH_SCIHUB_MIRRORS`)
 - **Safely retriable** — re-running skips already-downloaded files; `--idempotency-key` replays the exact envelope without any network I/O
 - **Self-updating** — when installed via `git clone`, the agent runs a synchronous `git pull --ff-only` on the first invocation per conversation, throttled to once per 24h via `<skill_dir>/.last_update`. Updates apply immediately. Zero user action required. Force an immediate check with `rm <skill_dir>/.last_update`.
 
@@ -244,7 +244,7 @@ MIT
 
 ## Support
 
-If this skill helps your work, consider supporting the author:
+If this skill helps you, consider supporting the author:
 
 <table>
   <tr>
@@ -262,6 +262,11 @@ If this skill helps your work, consider supporting the author:
       <img src="https://raw.githubusercontent.com/Agents365-ai/images_payment/main/qrcode/buymeacoffee.png" width="180" alt="Buy Me a Coffee">
       <br>
       <b>Buy Me a Coffee</b>
+    </td>
+    <td align="center">
+      <img src="https://raw.githubusercontent.com/Agents365-ai/images_payment/main/awarding/award.gif" width="180" alt="Give a Reward">
+      <br>
+      <b>Give a Reward</b>
     </td>
   </tr>
 </table>

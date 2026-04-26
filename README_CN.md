@@ -9,7 +9,7 @@
 - **零依赖** — 纯 Python 标准库，无需 `pip install`
 - **自动命名**：`{第一作者}_{年份}_{期刊简称}_{简短标题}.pdf`（期刊未知时省略；多词期刊取 ISO 风格首字母缩写，例如 *Proceedings of the National Academy of Sciences* → `PNAS`）
 - **批量模式**：`--batch` 传入 DOI 列表文件，或用 `--batch -` 从 stdin 管道读入
-- **Agent 原生** — stdout 输出稳定的 JSON 信封，stderr 输出 NDJSON 进度事件，提供机器可读的 `schema` 子命令，`--format` 自动识别 TTY，通过 `--idempotency-key` 支持幂等重试，退出码分类（`0`/`1`/`3`/`4`），批量部分失败时输出带 `next` 重试提示的 `ok: "partial"` 信封
+- **Agent 原生** — stdout 输出稳定的 JSON 信封，stderr 输出 NDJSON 进度事件，提供机器可读的 `schema` 子命令（含 `deprecations` 字段供前向兼容漂移检测），`--format` 自动识别 TTY，通过 `--idempotency-key` 支持幂等重试，退出码分类（`0`/`1`/`3`/`4`），批量部分失败时输出带 `next` 重试提示的 `ok: "partial"` 信封，结果信封含 `source_detail` 透出来源诊断信息（例如命中的 Sci-Hub 镜像，便于通过 `PAPER_FETCH_SCIHUB_MIRRORS` 锁定）
 - **安全可重试** — 重复运行会跳过已下载文件；`--idempotency-key` 直接复用原信封，无任何网络 I/O
 - **自动更新** — 通过 `git clone` 安装时，Agent 在每次会话首次调用时同步执行 `git pull --ff-only`，由 `<skill_dir>/.last_update` 节流（24 小时一次），更新立即生效。无需用户任何操作。强制立即检查：`rm <skill_dir>/.last_update`。
 
@@ -229,19 +229,19 @@ python scripts/fetch.py --batch dois.txt --stream
 
 MIT
 
-## 支持
+## 支持作者
 
 如果这个 skill 对你有帮助，欢迎支持作者：
 
 <table>
   <tr>
     <td align="center">
-      <img src="https://raw.githubusercontent.com/Agents365-ai/images_payment/main/qrcode/wechat-pay.png" width="180" alt="WeChat Pay">
+      <img src="https://raw.githubusercontent.com/Agents365-ai/images_payment/main/qrcode/wechat-pay.png" width="180" alt="微信支付">
       <br>
       <b>微信支付</b>
     </td>
     <td align="center">
-      <img src="https://raw.githubusercontent.com/Agents365-ai/images_payment/main/qrcode/alipay.png" width="180" alt="Alipay">
+      <img src="https://raw.githubusercontent.com/Agents365-ai/images_payment/main/qrcode/alipay.png" width="180" alt="支付宝">
       <br>
       <b>支付宝</b>
     </td>
@@ -249,6 +249,11 @@ MIT
       <img src="https://raw.githubusercontent.com/Agents365-ai/images_payment/main/qrcode/buymeacoffee.png" width="180" alt="Buy Me a Coffee">
       <br>
       <b>Buy Me a Coffee</b>
+    </td>
+    <td align="center">
+      <img src="https://raw.githubusercontent.com/Agents365-ai/images_payment/main/awarding/award.gif" width="180" alt="打赏">
+      <br>
+      <b>打赏</b>
     </td>
   </tr>
 </table>
