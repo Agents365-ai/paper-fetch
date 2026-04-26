@@ -1,11 +1,11 @@
-# paper-fetch — Legal Open-Access PDF Downloader
+# paper-fetch — Download Scientific papers automatically
 
 [中文文档](README_CN.md)
 
 ## What it does
 
-- Downloads paper PDFs from a **DOI** (or batch file of DOIs) via legal open-access sources
-- **5-source fallback chain**: [Unpaywall](https://unpaywall.org) → [Semantic Scholar](https://www.semanticscholar.org) `openAccessPdf` → [arXiv](https://arxiv.org) → [PubMed Central OA](https://pmc.ncbi.nlm.nih.gov) → [bioRxiv](https://www.biorxiv.org)/[medRxiv](https://www.medrxiv.org)
+- Downloads paper PDFs from a **DOI** (or batch file of DOIs) via open-access sources
+- **6-source fallback chain**: [Unpaywall](https://unpaywall.org) → [Semantic Scholar](https://www.semanticscholar.org) `openAccessPdf` → [arXiv](https://arxiv.org) → [PubMed Central OA](https://pmc.ncbi.nlm.nih.gov) → [bioRxiv](https://www.biorxiv.org)/[medRxiv](https://www.medrxiv.org) → [Sci-Hub](https://www.sci-hub.pub) mirrors (last resort, on by default)
 - **Zero dependencies** — pure Python standard library, no `pip install` needed
 - **Auto-named output** — `{first_author}_{year}_{journal_abbrev}_{short_title}.pdf` (journal omitted if unknown; multi-word journals get ISO-style initials, e.g. *Proceedings of the National Academy of Sciences* → `PNAS`)
 - **Batch mode** — pass a file of DOIs with `--batch`, or pipe them in with `--batch -`
@@ -15,7 +15,7 @@
 
 ## Discipline Coverage
 
-**The skill is discipline-agnostic** — it works for any field, not just life sciences or computer science. Coverage depends on whether the paper has a legal OA version, not on its subject area.
+**The skill is discipline-agnostic** — it works for any field, not just life sciences or computer science.
 
 | Source | Discipline scope |
 |---|---|
@@ -24,8 +24,9 @@
 | **arXiv** | Physics, math, CS, statistics, quantitative finance, economics, EE |
 | **PubMed Central** | Biomedical only |
 | **bioRxiv / medRxiv** | Biology / medicine preprints only |
+| **Sci-Hub mirrors** | ✅ All disciplines (last-resort fallback when every OA / institutional source misses) |
 
-In practice, **Unpaywall + Semantic Scholar alone cover OA papers in chemistry, materials, economics, psychology, humanities, and every other field** via institutional repositories, SSRN, RePEc, and publisher-hosted OA copies. arXiv/PMC/bioRxiv are additional fallbacks for their specific domains.
+In practice, **Unpaywall + Semantic Scholar alone cover OA papers in chemistry, materials, economics, psychology, humanities, and every other field** via institutional repositories, SSRN, RePEc, and publisher-hosted OA copies. arXiv/PMC/bioRxiv are additional fallbacks for their specific domains, and Sci-Hub is the universal last resort.
 
 ## Multi-Platform Support
 
@@ -218,7 +219,9 @@ Or just ask your agent naturally:
 3. **arXiv** — if the paper has an arXiv ID
 4. **PubMed Central OA subset** — if the paper has a PMCID
 5. **bioRxiv / medRxiv** — DOI prefix `10.1101/`
-6. Otherwise → report failure with metadata (title/authors) for ILL
+6. **Publisher direct** — institutional mode only (`PAPER_FETCH_INSTITUTIONAL=1`); your subscription IP / cookies / EZproxy authorize the fetch
+7. **Sci-Hub mirrors** — last resort, on by default. Tries `PAPER_FETCH_SCIHUB_MIRRORS` (or built-in defaults: `sci-hub.ru`, `sci-hub.st`, `sci-hub.su`, `sci-hub.box`, `sci-hub.red`, `sci-hub.al`, `sci-hub.mk`, `sci-hub.ee`); on full miss, scrapes `https://www.sci-hub.pub/` once for fresh mirrors. Disable with `PAPER_FETCH_NO_SCIHUB=1`.
+8. Otherwise → report failure with metadata (title/authors) for ILL
 
 ## Files
 

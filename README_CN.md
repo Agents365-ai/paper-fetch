@@ -1,11 +1,11 @@
-# paper-fetch — 合法开放获取 PDF 下载器
+# paper-fetch — Download Scientific papers automatically
 
 [English](README.md)
 
 ## 功能简介
 
-- 根据 **DOI**（或 DOI 批量文件）从合法开放获取源下载论文 PDF
-- **5 源回退链**：[Unpaywall](https://unpaywall.org) → [Semantic Scholar](https://www.semanticscholar.org) `openAccessPdf` → [arXiv](https://arxiv.org) → [PubMed Central OA](https://pmc.ncbi.nlm.nih.gov) → [bioRxiv](https://www.biorxiv.org)/[medRxiv](https://www.medrxiv.org)
+- 根据 **DOI**（或 DOI 批量文件）从开放获取源下载论文 PDF
+- **6 源回退链**：[Unpaywall](https://unpaywall.org) → [Semantic Scholar](https://www.semanticscholar.org) `openAccessPdf` → [arXiv](https://arxiv.org) → [PubMed Central OA](https://pmc.ncbi.nlm.nih.gov) → [bioRxiv](https://www.biorxiv.org)/[medRxiv](https://www.medrxiv.org) → [Sci-Hub](https://www.sci-hub.pub) 镜像（兜底，默认开启）
 - **零依赖** — 纯 Python 标准库，无需 `pip install`
 - **自动命名**：`{第一作者}_{年份}_{期刊简称}_{简短标题}.pdf`（期刊未知时省略；多词期刊取 ISO 风格首字母缩写，例如 *Proceedings of the National Academy of Sciences* → `PNAS`）
 - **批量模式**：`--batch` 传入 DOI 列表文件，或用 `--batch -` 从 stdin 管道读入
@@ -15,7 +15,7 @@
 
 ## 学科覆盖
 
-**本 skill 学科无关** —— 不限于生命科学或计算机，任何学科都支持。能否拿到取决于该论文是否有合法 OA 版本，而不是学科本身。
+**本 skill 学科无关** —— 不限于生命科学或计算机，任何学科都支持。
 
 | 来源 | 学科范围 |
 |---|---|
@@ -24,8 +24,9 @@
 | **arXiv** | 物理、数学、CS、统计、定量金融、经济学、电气工程 |
 | **PubMed Central** | 仅生物医学 |
 | **bioRxiv / medRxiv** | 仅生物/医学预印本 |
+| **Sci-Hub 镜像** | ✅ 全学科（兜底回退，所有 OA / 机构来源全部失败时启用） |
 
-实际使用中，**仅 Unpaywall + Semantic Scholar 两个源就足以覆盖化学、材料、经济、心理学、人文社科等任何领域的 OA 论文** —— 它们会自动命中机构知识库、SSRN、RePEc 以及出版商自托管的 OA 版本。arXiv/PMC/bioRxiv 只是针对各自领域的额外回退。
+实际使用中，**仅 Unpaywall + Semantic Scholar 两个源就足以覆盖化学、材料、经济、心理学、人文社科等任何领域的 OA 论文** —— 它们会自动命中机构知识库、SSRN、RePEc 以及出版商自托管的 OA 版本。arXiv/PMC/bioRxiv 只是针对各自领域的额外回退，Sci-Hub 则是面向全学科的最终兜底。
 
 ## 多平台支持
 
@@ -206,7 +207,9 @@ python scripts/fetch.py --batch dois.txt --stream
 3. **arXiv** — 论文有 arXiv ID 时
 4. **PubMed Central OA 子集** — 论文有 PMCID 时
 5. **bioRxiv / medRxiv** — DOI 前缀为 `10.1101/`
-6. 都失败 → 输出元数据提示走馆际互借
+6. **出版商直链** — 仅机构模式（`PAPER_FETCH_INSTITUTIONAL=1`）下启用，由调用方的订阅 IP / Cookies / EZproxy 授权
+7. **Sci-Hub 镜像** — 兜底来源，默认开启。优先按 `PAPER_FETCH_SCIHUB_MIRRORS` 设定的镜像顺序尝试（默认列表：`sci-hub.ru`、`sci-hub.st`、`sci-hub.su`、`sci-hub.box`、`sci-hub.red`、`sci-hub.al`、`sci-hub.mk`、`sci-hub.ee`）；全部失败时会从 `https://www.sci-hub.pub/` 抓取最新镜像列表再试一次。设置 `PAPER_FETCH_NO_SCIHUB=1` 可关闭。
+8. 都失败 → 输出元数据提示走馆际互借
 
 ## 文件说明
 

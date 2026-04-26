@@ -1,13 +1,13 @@
 ---
 name: paper-fetch
-description: Use when the user wants to download a paper PDF from a DOI (or title, resolved to a DOI first). Tries Unpaywall, arXiv, bioRxiv/medRxiv, PubMed Central, and Semantic Scholar in order.
+description: Use when the user wants to download a paper PDF from a DOI (or title, resolved to a DOI first). Tries Unpaywall, arXiv, bioRxiv/medRxiv, PubMed Central, Semantic Scholar, and Sci-Hub mirrors as a last-resort fallback.
 homepage: https://github.com/Agents365-ai/paper-fetch
 metadata: {"openclaw":{"requires":{"bins":["python3"]},"emoji":"📄"},"pimo":{"category":"research","tags":["paper","pdf","doi","open-access","download"]}}
 ---
 
 # paper-fetch
 
-Fetch the legal open-access PDF for a paper given a DOI (or title). Tries multiple OA sources in priority order and stops at the first hit.
+Fetch the PDF for a paper given a DOI (or title). Tries multiple sources in priority order and stops at the first hit.
 
 **Agent-native.** Structured JSON envelope on stdout, NDJSON progress on stderr (with a session header emitting `schema_version` / `cli_version` for drift detection), stable exit codes, machine-readable schema, TTY-aware format default, idempotent retries. `retry_after_hours` is emitted on every retryable error class.
 
@@ -18,8 +18,9 @@ Fetch the legal open-access PDF for a paper given a DOI (or title). Tries multip
 3. **arXiv** — if `externalIds.ArXiv` present, `https://arxiv.org/pdf/{arxiv_id}.pdf`
 4. **PubMed Central OA** — if PMCID present, `https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/`
 5. **bioRxiv / medRxiv** — if DOI prefix is `10.1101`, query `https://api.biorxiv.org/details/{server}/{doi}` for the latest version PDF URL
-6. **Publisher direct** *(institutional mode only — `PAPER_FETCH_INSTITUTIONAL=1`)* — last-resort DOI-prefix → publisher PDF template (Nature / Science / Wiley / Springer / ACS / PNAS / NEJM / Sage / T&F / Elsevier). The caller's own subscription IP / cookies / EZproxy are what authorize the fetch; unauthorized responses fail the `%PDF` check and fall through to step 7.
-7. Otherwise → report failure with title/authors so the user can request via ILL
+6. **Publisher direct** *(institutional mode only — `PAPER_FETCH_INSTITUTIONAL=1`)* — DOI-prefix → publisher PDF template (Nature / Science / Wiley / Springer / ACS / PNAS / NEJM / Sage / T&F / Elsevier). The caller's own subscription IP / cookies / EZproxy are what authorize the fetch; unauthorized responses fail the `%PDF` check and fall through to step 7.
+7. **Sci-Hub mirrors** *(on by default; disable with `PAPER_FETCH_NO_SCIHUB=1`)* — last-resort fallback. Tries the mirror list in `PAPER_FETCH_SCIHUB_MIRRORS` (or built-in defaults `sci-hub.ru`, `sci-hub.st`, `sci-hub.su`, `sci-hub.box`, `sci-hub.red`, `sci-hub.al`, `sci-hub.mk`, `sci-hub.ee`) in order; on full miss, scrapes `https://www.sci-hub.pub/` once per process for fresh mirrors. CAPTCHA / missing-paper pages have no PDF iframe and fall through silently.
+8. Otherwise → report failure with title/authors so the user can request via ILL
 
 If only a title is given, resolve to a DOI first via Semantic Scholar `search_paper_by_title` (asta MCP) or Crossref.
 
@@ -239,8 +240,10 @@ python scripts/fetch.py 10.1038/s41586-020-2649-2
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `UNPAYWALL_EMAIL` | unset | Contact email for Unpaywall API. Optional but recommended. Without it, Unpaywall is skipped (remaining 4 sources still work). |
-| `PAPER_FETCH_INSTITUTIONAL` | unset | Set to any value (e.g. `1`) to opt into **institutional mode** — activates a 1 req/s rate limiter to protect the operator's IP from publisher-side throttling. See below. |
+| `UNPAYWALL_EMAIL` | unset | Contact email for Unpaywall API. Optional but recommended. Without it, Unpaywall is skipped (remaining sources still work). |
+| `PAPER_FETCH_INSTITUTIONAL` | unset | Set to any value (e.g. `1`) to opt into **institutional mode** — activates a 1 req/s rate limiter and the publisher-direct fallback. See below. |
+| `PAPER_FETCH_NO_SCIHUB` | unset | Set to any value to disable the Sci-Hub fallback (step 7). |
+| `PAPER_FETCH_SCIHUB_MIRRORS` | unset | Comma-separated mirror hostnames to try in priority order (e.g. `sci-hub.ru,sci-hub.st,sci-hub.su`). Overrides built-in defaults. |
 | `PAPER_FETCH_NO_AUTO_UPDATE` | unset | Set to any value to disable silent background self-update |
 | `PAPER_FETCH_UPDATE_INTERVAL` | `86400` | Cooldown in seconds between update checks |
 

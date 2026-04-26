@@ -91,6 +91,26 @@ RETRY_AFTER_HOURS = {
 # their operators and do not need client-side pacing).
 INSTITUTIONAL_RATE_PER_SEC = 1.0
 
+# ---------------------------------------------------------------------------
+# Sci-Hub fallback
+# ---------------------------------------------------------------------------
+
+# Default mirror list (snapshot from https://www.sci-hub.pub/ on 2026-04-26).
+# Operator can override with PAPER_FETCH_SCIHUB_MIRRORS=sci-hub.ru,sci-hub.st,...
+# When all configured mirrors miss, we re-scan SCIHUB_DISCOVERY_URL once per
+# process for a fresh list.
+SCIHUB_DEFAULT_MIRRORS = (
+    "sci-hub.ru",
+    "sci-hub.st",
+    "sci-hub.su",
+    "sci-hub.box",
+    "sci-hub.red",
+    "sci-hub.al",
+    "sci-hub.mk",
+    "sci-hub.ee",
+)
+SCIHUB_DISCOVERY_URL = "https://www.sci-hub.pub/"
+
 # Hostnames blocked in every mode. Covers two threat classes:
 #   - loopback aliases that resolve to 127.0.0.1 / ::1 but pass the IP literal
 #     check (the ip literal check only fires when the URL host IS an IP)
@@ -565,6 +585,177 @@ def _try_publisher_direct(doi: str, *, timeout: int) -> tuple[str | None, str | 
 
 
 # ---------------------------------------------------------------------------
+# Sci-Hub resolver
+# ---------------------------------------------------------------------------
+
+# Primary: id="pdf" anchors are stable across both <iframe> (older .tf
+# domains) and <embed> (newer .st/.ru) Sci-Hub layouts; technique borrowed
+# from ethanwillis/zotero-scihub's responseXML.querySelector('#pdf').
+_SCIHUB_PDF_ID_RE = re.compile(
+    r'<(?:iframe|embed)[^>]*\bid=["\']?pdf["\']?[^>]*\bsrc=["\']?([^"\'\s>]+)',
+    re.IGNORECASE,
+)
+# Fallback: tag-based match when id attribute is missing.
+_SCIHUB_IFRAME_RE = re.compile(
+    r'<iframe[^>]+src=["\']?([^"\'\s>]+)',
+    re.IGNORECASE,
+)
+_SCIHUB_EMBED_RE = re.compile(
+    r'<embed[^>]+src=["\']?([^"\'\s>]+\.pdf[^"\'\s>]*)',
+    re.IGNORECASE,
+)
+_SCIHUB_DISCOVERY_RE = re.compile(
+    r'href=["\']https?://(?:www\.)?(sci-hub\.[a-z0-9.-]+)/?["\']',
+    re.IGNORECASE,
+)
+# Phrases that signal the paper is genuinely not in Sci-Hub's corpus
+# (vs. CAPTCHA / mirror outage). Lets us short-circuit instead of cycling
+# through every mirror.
+_SCIHUB_NOT_IN_CORPUS_PATTERNS = (
+    re.compile(r"please\s+try\s+to\s+search\s+again\s+using\s+doi", re.IGNORECASE),
+    re.compile(r"статья\s+не\s+найдена\s+в\s+базе", re.IGNORECASE),
+    re.compile(r"article\s+not\s+found\s+in\s+(?:the\s+)?database", re.IGNORECASE),
+)
+
+# Lazily populated; reset only on process restart.
+_scihub_discovered_cache: list[str] | None = None
+
+
+def _is_scihub_enabled() -> bool:
+    """True unless operator opted out via PAPER_FETCH_NO_SCIHUB=1."""
+    return not os.environ.get("PAPER_FETCH_NO_SCIHUB")
+
+
+def _scihub_mirrors() -> list[str]:
+    """Mirror list for Sci-Hub, in priority order.
+
+    PAPER_FETCH_SCIHUB_MIRRORS (comma-sep) overrides the built-in defaults.
+    Discovery (re-scanning SCIHUB_DISCOVERY_URL) is invoked separately by
+    `try_scihub` after the configured list is exhausted.
+    """
+    override = os.environ.get("PAPER_FETCH_SCIHUB_MIRRORS", "").strip()
+    if override:
+        return [m.strip().lstrip("htps:/").rstrip("/") for m in override.split(",") if m.strip()]
+    return list(SCIHUB_DEFAULT_MIRRORS)
+
+
+def _scihub_is_not_in_corpus(html: str) -> bool:
+    """True if the HTML matches a known 'paper not in database' message.
+
+    Lets the resolver skip the remaining mirrors when continuing is pointless
+    (every mirror serves the same shared corpus). Distinct from CAPTCHA, which
+    looks like an empty or challenge page — for that we still rotate mirrors.
+    """
+    return any(p.search(html) for p in _SCIHUB_NOT_IN_CORPUS_PATTERNS)
+
+
+def _scihub_extract_iframe(html: str) -> str | None:
+    """Extract the embedded PDF URL from a Sci-Hub paper page.
+
+    Sci-Hub returns an HTML page with an <iframe src="...pdf"> (or sometimes
+    an <embed src="...pdf">) pointing at the actual PDF on a CDN. Returns
+    the absolute https:// URL, or None if no embed found (CAPTCHA, missing
+    paper, or layout change).
+    """
+    # Try the id="pdf" anchor first — stable across iframe/embed layouts.
+    for pat in (_SCIHUB_PDF_ID_RE, _SCIHUB_IFRAME_RE, _SCIHUB_EMBED_RE):
+        for m in pat.finditer(html):
+            url = m.group(1).strip()
+            # Ignore non-PDF iframes (e.g., navigation menus).
+            if ".pdf" not in url.lower():
+                continue
+            if url.startswith("//"):
+                url = "https:" + url
+            elif url.startswith("/"):
+                # Relative to the mirror — we don't know which mirror produced
+                # this HTML here; skip. (In practice Sci-Hub PDF URLs are
+                # absolute or protocol-relative.)
+                continue
+            elif url.startswith("http://"):
+                url = "https://" + url[len("http://"):]
+            return url
+    return None
+
+
+def _scihub_discover_mirrors(*, timeout: int) -> list[str]:
+    """Scrape SCIHUB_DISCOVERY_URL for current mirror list. Cached per process."""
+    global _scihub_discovered_cache
+    if _scihub_discovered_cache is not None:
+        return _scihub_discovered_cache
+    try:
+        html = _get(SCIHUB_DISCOVERY_URL, accept="text/html", timeout=timeout).decode("utf-8", "replace")
+    except Exception as e:
+        _progress("scihub_discover_failed", reason=str(e))
+        _scihub_discovered_cache = []
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+    for m in _SCIHUB_DISCOVERY_RE.finditer(html):
+        host = m.group(1).lower()
+        if host in seen:
+            continue
+        seen.add(host)
+        found.append(host)
+    _scihub_discovered_cache = found
+    if found:
+        _progress("scihub_discover_ok", mirrors=found)
+    return found
+
+
+def try_scihub(doi: str, *, timeout: int) -> str | None:
+    """Resolve a DOI to a PDF URL via Sci-Hub mirrors.
+
+    Tries the configured mirror list in order; on exhaustion, performs a
+    one-shot discovery scan of SCIHUB_DISCOVERY_URL and tries any new
+    mirrors. Returns the absolute PDF URL or None if every mirror missed.
+
+    Short-circuits when a mirror explicitly reports the paper is not in
+    Sci-Hub's database — every mirror shares one corpus, so cycling further
+    just wastes round trips.
+    """
+    tried: set[str] = set()
+    mirrors = _scihub_mirrors()
+
+    def _try_one(host: str) -> tuple[str | None, str]:
+        """Returns (pdf_url, status). status is 'pdf' | 'no_pdf' | 'not_in_corpus' | 'error'."""
+        url = f"https://{host}/{doi}"
+        if not _is_allowed_host(url):
+            return None, "error"
+        try:
+            html = _get(url, accept="text/html,application/xhtml+xml", timeout=timeout).decode("utf-8", "replace")
+        except Exception:
+            return None, "error"
+        pdf = _scihub_extract_iframe(html)
+        if pdf:
+            return pdf, "pdf"
+        if _scihub_is_not_in_corpus(html):
+            return None, "not_in_corpus"
+        return None, "no_pdf"
+
+    def _walk(hosts: list[str]) -> tuple[str | None, bool]:
+        """Returns (pdf_url, gave_up). gave_up=True when a mirror confirmed not-in-corpus."""
+        for host in hosts:
+            if host in tried:
+                continue
+            tried.add(host)
+            pdf, status = _try_one(host)
+            if pdf:
+                return pdf, False
+            if status == "not_in_corpus":
+                _progress("source_miss", source="scihub", reason="not_in_corpus", mirror=host)
+                return None, True
+        return None, False
+
+    pdf, gave_up = _walk(mirrors)
+    if pdf or gave_up:
+        return pdf
+
+    fresh = _scihub_discover_mirrors(timeout=timeout)
+    pdf, _ = _walk(fresh)
+    return pdf
+
+
+# ---------------------------------------------------------------------------
 # Core fetch logic
 # ---------------------------------------------------------------------------
 
@@ -783,7 +974,7 @@ def fetch(
         else:
             _progress("source_miss", doi=doi, source="biorxiv")
 
-    # --- Publisher-direct fallback (institutional mode only, last resort) ---
+    # --- Publisher-direct fallback (institutional mode only) ---
     # Runs only when the operator has opted into institutional mode. The
     # caller's IP / cookies / EZproxy are what actually authorize the fetch.
     if _is_institutional():
@@ -795,6 +986,21 @@ def fetch(
             _add("publisher_direct", pub_url)
         else:
             _progress("source_miss", doi=doi, source="publisher_direct", reason="no_template_for_doi_prefix")
+
+    # --- Sci-Hub fallback (last resort) ---
+    # Runs only when every other source has missed (no candidates and no
+    # prior download attempts). Mirror list comes from PAPER_FETCH_SCIHUB_MIRRORS
+    # or the built-in defaults; exhaustion triggers a one-shot scan of
+    # SCIHUB_DISCOVERY_URL for fresh mirrors. Disabled with PAPER_FETCH_NO_SCIHUB=1.
+    if _is_scihub_enabled() and not candidates and not download_errors:
+        _progress("source_try", doi=doi, source="scihub")
+        sources_tried.append("scihub")
+        sh_url = try_scihub(doi, timeout=timeout)
+        if sh_url:
+            _progress("source_hit", doi=doi, source="scihub", pdf_url=sh_url)
+            _add("scihub", sh_url)
+        else:
+            _progress("source_miss", doi=doi, source="scihub")
 
     # --- Exhausted all sources with no candidates and no prior attempts → not_found ---
     if not candidates and not download_errors:
@@ -890,7 +1096,7 @@ def build_schema() -> dict:
         "command": "paper-fetch",
         "cli_version": CLI_VERSION,
         "schema_version": SCHEMA_VERSION,
-        "description": "Fetch legal open-access PDFs by DOI via Unpaywall, Semantic Scholar, arXiv, Europe PMC, PMC, and bioRxiv/medRxiv. In institutional mode (PAPER_FETCH_INSTITUTIONAL=1), also attempts a publisher-direct fetch (publisher_direct source) as a last resort — the caller's own subscription IP / cookies / EZproxy must grant access. On download failure (host_not_allowed, not_a_pdf, network_error), automatically falls back to the next candidate source.",
+        "description": "Fetch PDFs by DOI via Unpaywall, Semantic Scholar, arXiv, Europe PMC, PMC, and bioRxiv/medRxiv. In institutional mode (PAPER_FETCH_INSTITUTIONAL=1), also attempts a publisher-direct fetch (publisher_direct source) using the caller's own subscription IP / cookies / EZproxy. As a last resort, falls back to Sci-Hub mirrors (scihub source); disable with PAPER_FETCH_NO_SCIHUB=1. On download failure (host_not_allowed, not_a_pdf, network_error), automatically falls back to the next candidate source.",
         "subcommands": {
             "schema": "Print this schema as JSON and exit (no network).",
         },
@@ -988,7 +1194,9 @@ def build_schema() -> dict:
         },
         "env": {
             "UNPAYWALL_EMAIL": "Optional. Contact email for Unpaywall API. If unset, Unpaywall is skipped.",
-            "PAPER_FETCH_INSTITUTIONAL": "Optional. Set to any value to opt into institutional mode: activates a 1 req/s rate limiter to protect the operator's IP from publisher-side throttling. Intended for callers whose IP / cookies / EZproxy already grant legitimate subscription access. Does not bypass paywalls. SSRF defense applies in every mode.",
+            "PAPER_FETCH_INSTITUTIONAL": "Optional. Set to any value to opt into institutional mode: activates a 1 req/s rate limiter and enables the publisher-direct fallback. Intended for callers whose IP / cookies / EZproxy already grant subscription access. SSRF defense applies in every mode.",
+            "PAPER_FETCH_NO_SCIHUB": "Optional. Set to any value to disable the Sci-Hub fallback (enabled by default).",
+            "PAPER_FETCH_SCIHUB_MIRRORS": "Optional. Comma-separated list of Sci-Hub mirror hostnames to try, in priority order, overriding the built-in defaults (e.g. 'sci-hub.ru,sci-hub.st,sci-hub.su').",
             "PAPER_FETCH_NO_AUTO_UPDATE": "Optional. Set to any value to disable silent background self-update.",
             "PAPER_FETCH_UPDATE_INTERVAL": "Optional. Cooldown in seconds between update checks. Default 86400.",
         },
