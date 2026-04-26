@@ -40,8 +40,8 @@ from pathlib import Path
 # Versioning
 # ---------------------------------------------------------------------------
 
-CLI_VERSION = "0.11.0"
-SCHEMA_VERSION = "1.7.0"
+CLI_VERSION = "0.12.0"
+SCHEMA_VERSION = "1.8.0"
 
 # ---------------------------------------------------------------------------
 # Config
@@ -61,11 +61,6 @@ DOWNLOAD_UA = (
 )
 DEFAULT_TIMEOUT = 30
 MAX_PDF_SIZE = 50 * 1024 * 1024  # 50 MB
-
-# Auto-update (background git pull). Default 24h between checks.
-# Disable with PAPER_FETCH_NO_AUTO_UPDATE=1. Override interval with
-# PAPER_FETCH_UPDATE_INTERVAL=<seconds>.
-AUTO_UPDATE_COOLDOWN_SEC = int(os.environ.get("PAPER_FETCH_UPDATE_INTERVAL", "86400"))
 
 EXIT_SUCCESS = 0
 EXIT_UNRESOLVED = 1
@@ -266,8 +261,6 @@ def _progress(event: str, **fields) -> None:
         _log_text(f"  [skip-existing] {fields.get('file', '?')}")
     elif event == "dry_run":
         _log_text(f"  [dry-run] [{fields.get('source', '?')}] {fields.get('pdf_url', '?')} → {fields.get('file', '?')}")
-    elif event == "update_check_spawned":
-        _log_text("  [auto-update] background git pull spawned")
     elif event == "not_found":
         _log_text(f"  no OA PDF found for {fields.get('doi', '?')}")
     else:
@@ -1231,66 +1224,8 @@ def build_schema() -> dict:
             "PAPER_FETCH_INSTITUTIONAL": "Optional. Set to any value to opt into institutional mode: activates a 1 req/s rate limiter and enables the publisher-direct fallback. Intended for callers whose IP / cookies / EZproxy already grant subscription access. SSRF defense applies in every mode.",
             "PAPER_FETCH_NO_SCIHUB": "Optional. Set to any value to disable the Sci-Hub fallback (enabled by default).",
             "PAPER_FETCH_SCIHUB_MIRRORS": "Optional. Comma-separated list of Sci-Hub mirror hostnames to try, in priority order, overriding the built-in defaults (e.g. 'sci-hub.ru,sci-hub.st,sci-hub.su').",
-            "PAPER_FETCH_NO_AUTO_UPDATE": "Optional. Set to any value to disable silent background self-update.",
-            "PAPER_FETCH_UPDATE_INTERVAL": "Optional. Cooldown in seconds between update checks. Default 86400.",
         },
     }
-
-
-# ---------------------------------------------------------------------------
-# Auto-update
-# ---------------------------------------------------------------------------
-
-
-def maybe_self_update() -> bool:
-    """Spawn a detached background 'git pull --ff-only' to keep the skill up to date.
-
-    Returns True if a background pull was spawned (observable by callers),
-    False otherwise. Silent, non-blocking, best-effort.
-
-    No-ops when:
-      - PAPER_FETCH_NO_AUTO_UPDATE is set
-      - The skill directory is not a git checkout
-      - The last update attempt was within AUTO_UPDATE_COOLDOWN_SEC
-      - The `git` binary is unavailable
-      - Any error occurs (never interferes with the main flow)
-    """
-    if os.environ.get("PAPER_FETCH_NO_AUTO_UPDATE"):
-        return False
-    try:
-        import subprocess
-
-        skill_dir = Path(__file__).resolve().parent.parent
-        git_dir = skill_dir / ".git"
-        if not git_dir.exists():
-            return False
-
-        stamp = git_dir / ".paper-fetch-last-update"
-        now = time.time()
-        if stamp.exists():
-            try:
-                if now - stamp.stat().st_mtime < AUTO_UPDATE_COOLDOWN_SEC:
-                    return False
-            except OSError:
-                pass
-
-        try:
-            stamp.touch(exist_ok=True)
-            os.utime(stamp, (now, now))
-        except OSError:
-            return False
-
-        subprocess.Popen(
-            ["git", "-C", str(skill_dir), "pull", "--ff-only", "--quiet"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-        )
-        return True
-    except Exception:
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -1460,10 +1395,6 @@ def main():
     # One-time session header — lets agents detect schema drift on the very
     # first stderr line, before any per-DOI work or network I/O.
     _progress("session", cli_version=CLI_VERSION, schema_version=SCHEMA_VERSION)
-
-    # Fire auto-update now that format is known, so the event is routable.
-    if maybe_self_update():
-        _progress("update_check_spawned")
 
     if not EMAIL:
         _progress("source_skip", source="unpaywall", reason="UNPAYWALL_EMAIL not set (top-level notice)")

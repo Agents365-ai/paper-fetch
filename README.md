@@ -11,7 +11,7 @@
 - **Batch mode** — pass a file of DOIs with `--batch`, or pipe them in with `--batch -`
 - **Agent-native** — stable JSON envelope on stdout, NDJSON progress on stderr, machine-readable `schema` subcommand, TTY-aware format default, idempotent retries via `--idempotency-key`, typed exit codes (`0`/`1`/`3`/`4`), partial-success batches with `next` retry hints
 - **Safely retriable** — re-running skips already-downloaded files; `--idempotency-key` replays the exact envelope without any network I/O
-- **Self-updating** — when installed via `git clone`, each invocation spawns a detached background `git pull --ff-only` (throttled to once per 24h). Zero user action required. Disable with `export PAPER_FETCH_NO_AUTO_UPDATE=1`.
+- **Self-updating** — when installed via `git clone`, the agent runs a synchronous `git pull --ff-only` on the first invocation per conversation, throttled to once per 24h via `<skill_dir>/.last_update`. Updates apply immediately. Zero user action required. Force an immediate check with `rm <skill_dir>/.last_update`.
 
 ## Discipline Coverage
 

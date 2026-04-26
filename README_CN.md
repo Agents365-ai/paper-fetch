@@ -11,7 +11,7 @@
 - **批量模式**：`--batch` 传入 DOI 列表文件，或用 `--batch -` 从 stdin 管道读入
 - **Agent 原生** — stdout 输出稳定的 JSON 信封，stderr 输出 NDJSON 进度事件，提供机器可读的 `schema` 子命令，`--format` 自动识别 TTY，通过 `--idempotency-key` 支持幂等重试，退出码分类（`0`/`1`/`3`/`4`），批量部分失败时输出带 `next` 重试提示的 `ok: "partial"` 信封
 - **安全可重试** — 重复运行会跳过已下载文件；`--idempotency-key` 直接复用原信封，无任何网络 I/O
-- **自动更新** — 通过 `git clone` 安装时，每次调用会后台 detach 一个 `git pull --ff-only`（24 小时内至多一次）。无需用户任何操作。禁用：`export PAPER_FETCH_NO_AUTO_UPDATE=1`。
+- **自动更新** — 通过 `git clone` 安装时，Agent 在每次会话首次调用时同步执行 `git pull --ff-only`，由 `<skill_dir>/.last_update` 节流（24 小时一次），更新立即生效。无需用户任何操作。强制立即检查：`rm <skill_dir>/.last_update`。
 
 ## 学科覆盖
 
