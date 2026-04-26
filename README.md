@@ -5,9 +5,9 @@
 ## What it does
 
 - Downloads paper PDFs from a **DOI** (or batch file of DOIs) via legal open-access sources
-- **5-source fallback chain**: Unpaywall → Semantic Scholar `openAccessPdf` → arXiv → PubMed Central OA → bioRxiv/medRxiv
+- **5-source fallback chain**: [Unpaywall](https://unpaywall.org) → [Semantic Scholar](https://www.semanticscholar.org) `openAccessPdf` → [arXiv](https://arxiv.org) → [PubMed Central OA](https://pmc.ncbi.nlm.nih.gov) → [bioRxiv](https://www.biorxiv.org)/[medRxiv](https://www.medrxiv.org)
 - **Zero dependencies** — pure Python standard library, no `pip install` needed
-- **Auto-named output** — `{first_author}_{year}_{short_title}.pdf`
+- **Auto-named output** — `{first_author}_{year}_{journal_abbrev}_{short_title}.pdf` (journal omitted if unknown; multi-word journals get ISO-style initials, e.g. *Proceedings of the National Academy of Sciences* → `PNAS`)
 - **Batch mode** — pass a file of DOIs with `--batch`, or pipe them in with `--batch -`
 - **Agent-native** — stable JSON envelope on stdout, NDJSON progress on stderr, machine-readable `schema` subcommand, TTY-aware format default, idempotent retries via `--idempotency-key`, typed exit codes (`0`/`1`/`3`/`4`), partial-success batches with `next` retry hints
 - **Safely retriable** — re-running skips already-downloaded files; `--idempotency-key` replays the exact envelope without any network I/O

@@ -5,9 +5,9 @@
 ## 功能简介
 
 - 根据 **DOI**（或 DOI 批量文件）从合法开放获取源下载论文 PDF
-- **5 源回退链**：Unpaywall → Semantic Scholar `openAccessPdf` → arXiv → PubMed Central OA → bioRxiv/medRxiv
+- **5 源回退链**：[Unpaywall](https://unpaywall.org) → [Semantic Scholar](https://www.semanticscholar.org) `openAccessPdf` → [arXiv](https://arxiv.org) → [PubMed Central OA](https://pmc.ncbi.nlm.nih.gov) → [bioRxiv](https://www.biorxiv.org)/[medRxiv](https://www.medrxiv.org)
 - **零依赖** — 纯 Python 标准库，无需 `pip install`
-- **自动命名**：`{第一作者}_{年份}_{简短标题}.pdf`
+- **自动命名**：`{第一作者}_{年份}_{期刊简称}_{简短标题}.pdf`（期刊未知时省略；多词期刊取 ISO 风格首字母缩写，例如 *Proceedings of the National Academy of Sciences* → `PNAS`）
 - **批量模式**：`--batch` 传入 DOI 列表文件，或用 `--batch -` 从 stdin 管道读入
 - **Agent 原生** — stdout 输出稳定的 JSON 信封，stderr 输出 NDJSON 进度事件，提供机器可读的 `schema` 子命令，`--format` 自动识别 TTY，通过 `--idempotency-key` 支持幂等重试，退出码分类（`0`/`1`/`3`/`4`），批量部分失败时输出带 `next` 重试提示的 `ok: "partial"` 信封
 - **安全可重试** — 重复运行会跳过已下载文件；`--idempotency-key` 直接复用原信封，无任何网络 I/O

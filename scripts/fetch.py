@@ -388,11 +388,31 @@ def _slug(s: str, n: int = 40) -> str:
     return s[:n]
 
 
+_JOURNAL_STOPWORDS = {"the", "of", "and", "for", "in", "on", "a", "an", "to", "&"}
+
+
+def _journal_abbrev(name: str | None, max_len: int = 20) -> str:
+    """ISO-style initials for 3+ words (PNAS, JACS, NEJM); CamelCase otherwise."""
+    if not name:
+        return ""
+    words = [w for w in re.split(r"[^A-Za-z0-9]+", name) if w and w.lower() not in _JOURNAL_STOPWORDS]
+    if not words:
+        return ""
+    if len(words) >= 3:
+        return "".join(w[0].upper() for w in words)[:max_len]
+    return "".join(w[:1].upper() + w[1:] for w in words)[:max_len]
+
+
 def _filename(meta: dict) -> str:
     author = _slug((meta.get("author") or "unknown").split()[-1], 20)
     year = str(meta.get("year") or "nd")
+    journal = _journal_abbrev(meta.get("journal"))
     title = _slug(meta.get("title") or "paper", 40)
-    return f"{author}_{year}_{title}.pdf"
+    parts = [author, year]
+    if journal:
+        parts.append(journal)
+    parts.append(title)
+    return "_".join(parts) + ".pdf"
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +431,7 @@ def try_unpaywall(doi: str, *, timeout: int) -> tuple[str | None, dict]:
         "title": d.get("title"),
         "year": d.get("year"),
         "author": (d.get("z_authors") or [{}])[0].get("family") if d.get("z_authors") else None,
+        "journal": d.get("journal_name"),
     }
     loc = d.get("best_oa_location") or {}
     return loc.get("url_for_pdf"), meta
@@ -419,7 +440,7 @@ def try_unpaywall(doi: str, *, timeout: int) -> tuple[str | None, dict]:
 def try_semantic_scholar(doi: str, *, timeout: int) -> tuple[str | None, dict, dict]:
     url = (
         f"https://api.semanticscholar.org/graph/v1/paper/DOI:{urllib.parse.quote(doi)}"
-        "?fields=title,year,authors,openAccessPdf,externalIds"
+        "?fields=title,year,authors,openAccessPdf,externalIds,venue"
     )
     try:
         d = _get_json(url, timeout=timeout)
@@ -430,6 +451,7 @@ def try_semantic_scholar(doi: str, *, timeout: int) -> tuple[str | None, dict, d
         "title": d.get("title"),
         "year": d.get("year"),
         "author": (d.get("authors") or [{}])[0].get("name"),
+        "journal": d.get("venue") or None,
     }
     pdf = (d.get("openAccessPdf") or {}).get("url")
     return pdf, meta, d.get("externalIds") or {}
