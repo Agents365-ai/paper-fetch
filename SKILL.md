@@ -40,6 +40,8 @@ If only a title is given, pass it directly via `--title "<title>"`. Resolution c
 
 Either way the resolved DOI, the winning resolver, the full `resolvers_tried` list, and the top candidate matches are all surfaced under `meta.title_resolution`.
 
+**If `asta-skill` is registered**, the agent can alternatively resolve title → DOI through the Asta MCP first, then pass the DOI directly here. This skips paper-fetch's two-stage Crossref/S2 chain in favor of Asta's richer search surface (relevance ranking, snippet search, citation graph). Workflow: call `asta__search_paper_by_title("<title>", fields="title,year,authors,externalIds")`, read `externalIds.DOI` (or `10.48550/arXiv.<ArXiv>` when only `ArXiv` is present), then `paper-fetch <doi>`. Use `--title` when Asta isn't available or when a single command is preferred.
+
 ## Usage
 
 ```bash
