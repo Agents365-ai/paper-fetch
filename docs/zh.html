@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>paper-fetch — 合法开放获取 PDF 下载器</title>
-  <meta name="description" content="Claude Code skill，通过 DOI 从合法 OA 源下载论文 PDF。Unpaywall、Semantic Scholar、arXiv、PMC、bioRxiv 五源回退。学科无关，零依赖。">
+  <title>paper-fetch — 开放获取 PDF 下载器</title>
+  <meta name="description" content="Claude Code skill，通过 DOI 下载论文 PDF。六源回退链：Unpaywall、Semantic Scholar、arXiv、PMC、bioRxiv，再到 Sci-Hub 镜像作为最后兜底（可通过 PAPER_FETCH_NO_SCIHUB=1 关闭）。学科无关，零依赖。">
   <meta name="theme-color" content="#0d1117">
   <link rel="canonical" href="https://agents365-ai.github.io/paper-fetch/zh.html">
   <link rel="alternate" hreflang="zh" href="https://agents365-ai.github.io/paper-fetch/zh.html">
   <link rel="alternate" hreflang="en" href="https://agents365-ai.github.io/paper-fetch/">
-  <meta property="og:title" content="paper-fetch — 合法开放获取 PDF 下载器">
-  <meta property="og:description" content="通过 DOI 从 Unpaywall、Semantic Scholar、arXiv、PMC、bioRxiv 合法下载论文 PDF。学科无关，绝不使用 Sci-Hub。">
+  <meta property="og:title" content="paper-fetch — 开放获取 PDF 下载器">
+  <meta property="og:description" content="通过 DOI 从 Unpaywall、Semantic Scholar、arXiv、PMC、bioRxiv 下载论文 PDF，并在所有 OA 源都没命中时回退到 Sci-Hub 镜像（可关闭）。">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://agents365-ai.github.io/paper-fetch/zh.html">
   <meta name="twitter:card" content="summary">
@@ -205,9 +205,9 @@
   <!-- Hero -->
   <div class="hero">
     <div class="container">
-      <div class="hero-badge">5 源合法 OA 回退链</div>
+      <div class="hero-badge">6 源回退链 &middot; OA 优先，Sci-Hub 兜底</div>
       <h1>paper-<span>fetch</span></h1>
-      <p>输入 DOI，输出 PDF。一个 Claude Code skill，通过 Unpaywall、Semantic Scholar、arXiv、PubMed Central、bioRxiv 合法解析论文 PDF —— 覆盖所有学科，零依赖。</p>
+      <p>输入 DOI，输出 PDF。一个 Claude Code skill，依次尝试 Unpaywall、Semantic Scholar、arXiv、PubMed Central、bioRxiv/medRxiv，最后回退到 Sci-Hub 镜像 —— 覆盖所有学科，零依赖。设置 <code>PAPER_FETCH_NO_SCIHUB=1</code> 可关闭 Sci-Hub 兜底。</p>
       <div class="hero-install">
         <code id="install-cmd">git clone https://github.com/Agents365-ai/paper-fetch.git ~/.claude/skills/paper-fetch</code>
         <button class="copy-btn" onclick="copyInstall()">复制</button>
@@ -224,12 +224,12 @@
   <section>
     <div class="container">
       <h2 class="section-title">为什么选择这个 Skill</h2>
-      <p class="section-sub">一个确定性的、仅合法的 "帮我找 PDF" 替代方案。</p>
+      <p class="section-sub">一个确定性的 "帮我找 PDF" 替代方案。</p>
       <div class="features-grid">
         <div class="feature-card">
           <div class="feature-icon">&#x1F517;</div>
-          <h3>5 源回退链</h3>
-          <p>Unpaywall &rarr; Semantic Scholar &rarr; arXiv &rarr; PubMed Central &rarr; bioRxiv/medRxiv。命中即停，都失败时输出元数据提示走馆际互借。</p>
+          <h3>6 源回退链</h3>
+          <p>Unpaywall &rarr; Semantic Scholar &rarr; arXiv &rarr; PubMed Central &rarr; bioRxiv/medRxiv &rarr; Sci-Hub 镜像。命中第一份有效 PDF 即停，都失败时输出元数据。</p>
         </div>
         <div class="feature-card">
           <div class="feature-icon">&#x1F310;</div>
@@ -238,8 +238,8 @@
         </div>
         <div class="feature-card">
           <div class="feature-icon">&#x1F6E1;&#xFE0F;</div>
-          <h3>始终合法</h3>
-          <p>绝不使用 Sci-Hub 或任何付费墙绕过服务。没有 OA 版本时如实报告失败，返回标题 + 作者信息便于发起 ILL 请求。</p>
+          <h3>OA 优先，Sci-Hub 兜底</h3>
+          <p>所有合法 OA 源全部尝试完之后才会回退到 Sci-Hub。请求采用移动端 UA，限速 1 req/s。设置 <code>PAPER_FETCH_NO_SCIHUB=1</code> 完全关闭；通过 <code>PAPER_FETCH_SCIHUB_MIRRORS</code> 指定镜像。</p>
         </div>
         <div class="feature-card">
           <div class="feature-icon">&#x26A1;</div>
@@ -301,6 +301,13 @@
             <p>若 DOI 前缀为 <code>10.1101</code>，查询 <code>api.biorxiv.org/details/{server}/{doi}</code> 获取最新版本的 PDF URL。生物和医学预印本。</p>
           </div>
         </div>
+        <div class="chain-step">
+          <div class="chain-num">6</div>
+          <div class="chain-body">
+            <h4>Sci-Hub 镜像（最后兜底）</h4>
+            <p>仅当所有 OA 源都没命中时，按顺序遍历配置的镜像列表（<code>sci-hub.ru</code>、<code>.st</code>、<code>.se</code>、…）。请求采用移动端 UA，限速 1 req/s；当页面明确返回"语料库中无此论文"时立即短路。设置 <code>PAPER_FETCH_NO_SCIHUB=1</code> 关闭；通过 <code>PAPER_FETCH_SCIHUB_MIRRORS</code> 覆盖镜像列表。</p>
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -341,7 +348,7 @@
           <tr><th>功能</th><th>原生智能体</th><th>本 Skill</th></tr>
         </thead>
         <tbody>
-          <tr><td>DOI 解析策略</td><td class="cross">临时网络搜索</td><td class="check">&#x2713; 确定性 5 源链</td></tr>
+          <tr><td>DOI 解析策略</td><td class="cross">临时网络搜索</td><td class="check">&#x2713; 确定性 6 源链</td></tr>
           <tr><td>Unpaywall 集成</td><td class="cross">&#x2717;</td><td class="check">&#x2713; OA 命中率最高</td></tr>
           <tr><td>arXiv / PMC / bioRxiv 回退</td><td class="cross">手动</td><td class="check">&#x2713; 自动</td></tr>
           <tr><td>批量下载</td><td class="cross">&#x2717;</td><td class="check">&#x2713; <code>--batch dois.txt</code> 或 <code>--batch -</code>（stdin）</td></tr>
@@ -354,7 +361,7 @@
           <tr><td>域名白名单安全</td><td class="cross">&#x2717;</td><td class="check">&#x2713; 仅限已知 OA 域名</td></tr>
           <tr><td>50 MB 大小限制</td><td class="cross">&#x2717;</td><td class="check">&#x2713; 防止异常大文件</td></tr>
           <tr><td>PDF 头校验</td><td class="cross">&#x2717;</td><td class="check">&#x2713; 拒绝 HTML 落地页</td></tr>
-          <tr><td>合法来源保证</td><td class="cross">无</td><td class="check">&#x2713; 硬性拒绝付费墙绕过</td></tr>
+          <tr><td>Sci-Hub 兜底回退</td><td class="cross">无</td><td class="check">&#x2713; 移动 UA、1 req/s 限速，可通过 <code>PAPER_FETCH_NO_SCIHUB=1</code> 关闭</td></tr>
           <tr><td>依赖</td><td class="cross">各异</td><td class="check">&#x2713; 仅 Python 标准库</td></tr>
           <tr><td>跨学科支持</td><td class="cross">不确定</td><td class="check">&#x2713; 任何领域</td></tr>
         </tbody>
@@ -466,7 +473,7 @@ python scripts/fetch.py schema --pretty</pre>
         <a href="https://github.com/Agents365-ai">Agents365-ai</a>
       </p>
       <p style="margin-top: 8px; font-size: 12px;">
-        绝不使用 Sci-Hub 或任何付费墙绕过服务。仅限开放获取来源。
+        OA 优先。Sci-Hub 镜像仅作为最后兜底 —— 设置 <code>PAPER_FETCH_NO_SCIHUB=1</code> 即可关闭。
       </p>
     </div>
   </footer>

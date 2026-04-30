@@ -25,10 +25,12 @@ agents that cache schema should compare against it to detect drift.
 from __future__ import annotations
 
 import argparse
+import html.parser
 import ipaddress
 import json
 import os
 import re
+import shlex
 import sys
 import time
 import urllib.parse
@@ -61,6 +63,12 @@ DOWNLOAD_UA = (
 )
 DEFAULT_TIMEOUT = 30
 MAX_PDF_SIZE = 50 * 1024 * 1024  # 50 MB
+
+# Canonical DOI shape — kept here so build_schema() and runtime validation
+# share one source of truth. Schema-side this is exposed as the regex below
+# without the surrounding anchors.
+DOI_PATTERN = r"^10\..+/.+$"
+_DOI_RE = re.compile(DOI_PATTERN)
 
 EXIT_SUCCESS = 0
 EXIT_UNRESOLVED = 1
@@ -608,22 +616,6 @@ def _try_publisher_direct(doi: str, *, timeout: int) -> tuple[str | None, str | 
 # Sci-Hub resolver
 # ---------------------------------------------------------------------------
 
-# Primary: id="pdf" anchors are stable across both <iframe> (older .tf
-# domains) and <embed> (newer .st/.ru) Sci-Hub layouts; technique borrowed
-# from ethanwillis/zotero-scihub's responseXML.querySelector('#pdf').
-_SCIHUB_PDF_ID_RE = re.compile(
-    r'<(?:iframe|embed)[^>]*\bid=["\']?pdf["\']?[^>]*\bsrc=["\']?([^"\'\s>]+)',
-    re.IGNORECASE,
-)
-# Fallback: tag-based match when id attribute is missing.
-_SCIHUB_IFRAME_RE = re.compile(
-    r'<iframe[^>]+src=["\']?([^"\'\s>]+)',
-    re.IGNORECASE,
-)
-_SCIHUB_EMBED_RE = re.compile(
-    r'<embed[^>]+src=["\']?([^"\'\s>]+\.pdf[^"\'\s>]*)',
-    re.IGNORECASE,
-)
 _SCIHUB_DISCOVERY_RE = re.compile(
     r'href=["\']https?://(?:www\.)?(sci-hub\.[a-z0-9.-]+)/?["\']',
     re.IGNORECASE,
@@ -655,8 +647,45 @@ def _scihub_mirrors() -> list[str]:
     """
     override = os.environ.get("PAPER_FETCH_SCIHUB_MIRRORS", "").strip()
     if override:
-        return [m.strip().lstrip("htps:/").rstrip("/") for m in override.split(",") if m.strip()]
+        return _parse_mirror_overrides(override)
     return list(SCIHUB_DEFAULT_MIRRORS)
+
+
+def _parse_mirror_overrides(raw: str) -> list[str]:
+    """Parse comma-separated mirror overrides into bare hostnames.
+
+    Accepts forms like ``sci-hub.ru``, ``https://sci-hub.ru``, or
+    ``sci-hub.ru/path/`` and returns just the hostname. Empty / unsafe
+    entries (non-http(s) schemes, IP literals in private space, blocked
+    hosts) are dropped — without this, a typo in the env var could route
+    traffic at an attacker-controlled host.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw_entry in raw.split(","):
+        entry = raw_entry.strip().rstrip("/")
+        if not entry:
+            continue
+        # Add a scheme so urlparse splits hostname correctly for bare
+        # ``sci-hub.ru`` inputs (urlparse treats them as path-only).
+        candidate = entry if "://" in entry else "https://" + entry
+        try:
+            parsed = urllib.parse.urlparse(candidate)
+        except ValueError:
+            continue
+        if parsed.scheme not in ("http", "https"):
+            continue
+        host = (parsed.hostname or "").lower()
+        if not host or host in seen:
+            continue
+        # Reuse the universal SSRF guard so an override of e.g.
+        # ``localhost`` or a private IP literal is dropped.
+        ok, _ = _is_safe_url(f"https://{host}/")
+        if not ok:
+            continue
+        seen.add(host)
+        out.append(host)
+    return out
 
 
 def _scihub_is_not_in_corpus(html: str) -> bool:
@@ -669,7 +698,55 @@ def _scihub_is_not_in_corpus(html: str) -> bool:
     return any(p.search(html) for p in _SCIHUB_NOT_IN_CORPUS_PATTERNS)
 
 
-def _scihub_extract_iframe(html: str, mirror_host: str | None = None) -> str | None:
+class _ScihubEmbedFinder(html.parser.HTMLParser):
+    """Collect <iframe>/<embed> tags from Sci-Hub paper pages.
+
+    Order-independent attribute capture — unlike the prior regex, an
+    ``<iframe src="..." id="pdf">`` is treated identically to
+    ``<iframe id="pdf" src="...">``. Records all candidates so the caller
+    can prefer ``id="pdf"`` and fall back to any ``.pdf`` src.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        # list of (id_attr_lower, src_attr) tuples, in document order.
+        self.candidates: list[tuple[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        self._maybe_record(tag, attrs)
+
+    def handle_startendtag(self, tag: str, attrs: list) -> None:
+        # Self-closing variant (<embed ... />) — still want to capture.
+        self._maybe_record(tag, attrs)
+
+    def _maybe_record(self, tag: str, attrs: list) -> None:
+        if tag.lower() not in ("iframe", "embed"):
+            return
+        attr_map = {(k or "").lower(): (v or "") for k, v in attrs}
+        src = attr_map.get("src", "").strip()
+        if not src:
+            return
+        self.candidates.append((attr_map.get("id", "").lower(), src))
+
+
+def _scihub_normalize_pdf_url(url: str, mirror_host: str | None) -> str | None:
+    """Normalize a candidate src into an absolute https URL.
+
+    Returns None if the URL is path-relative without a mirror context to
+    anchor it against — the caller will fall back to another mirror.
+    """
+    if url.startswith("//"):
+        return "https:" + url
+    if url.startswith("/"):
+        if not mirror_host:
+            return None
+        return f"https://{mirror_host}{url}"
+    if url.startswith("http://"):
+        return "https://" + url[len("http://"):]
+    return url
+
+
+def _scihub_extract_iframe(html_text: str, mirror_host: str | None = None) -> str | None:
     """Extract the embedded PDF URL from a Sci-Hub paper page.
 
     Sci-Hub returns an HTML page with an <iframe src="...pdf"> (or sometimes
@@ -678,23 +755,34 @@ def _scihub_extract_iframe(html: str, mirror_host: str | None = None) -> str | N
     paper, or layout change). When `mirror_host` is provided, path-relative
     URLs (e.g. `/downloads/abc.pdf`) are resolved against it.
     """
-    # Try the id="pdf" anchor first — stable across iframe/embed layouts.
-    for pat in (_SCIHUB_PDF_ID_RE, _SCIHUB_IFRAME_RE, _SCIHUB_EMBED_RE):
-        for m in pat.finditer(html):
-            url = m.group(1).strip()
-            # Ignore non-PDF iframes (e.g., navigation menus).
-            if ".pdf" not in url.lower():
+    finder = _ScihubEmbedFinder()
+    try:
+        finder.feed(html_text)
+    except Exception:
+        # Malformed markup — bail to None so the caller rotates mirrors.
+        return None
+
+    # Prefer tags carrying id="pdf" regardless of attribute order in the source.
+    # Within each tier, prefer entries whose src contains ".pdf".
+    pdf_id = [(i, s) for i, s in finder.candidates if i == "pdf"]
+    other = [(i, s) for i, s in finder.candidates if i != "pdf"]
+
+    for tier in (pdf_id, other):
+        # First pass within tier — strict ".pdf" hint.
+        for _, src in tier:
+            if ".pdf" not in src.lower():
                 continue
-            if url.startswith("//"):
-                url = "https:" + url
-            elif url.startswith("/"):
-                if not mirror_host:
-                    # No mirror context — caller will try another mirror.
-                    continue
-                url = f"https://{mirror_host}{url}"
-            elif url.startswith("http://"):
-                url = "https://" + url[len("http://"):]
-            return url
+            normalized = _scihub_normalize_pdf_url(src.strip(), mirror_host)
+            if normalized:
+                return normalized
+        # Second pass within the id="pdf" tier — Sci-Hub sometimes serves
+        # an obfuscated CDN URL without the ``.pdf`` extension. Trust the
+        # explicit id anchor over filename hints.
+        if tier is pdf_id:
+            for _, src in tier:
+                normalized = _scihub_normalize_pdf_url(src.strip(), mirror_host)
+                if normalized:
+                    return normalized
     return None
 
 
@@ -842,17 +930,38 @@ def fetch(
     """
     doi = doi.strip()
     # str.removeprefix is Python 3.9+; README advertises 3.8+.
-    for _prefix in ("https://doi.org/", "doi.org/"):
+    for _prefix in ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "http://dx.doi.org/", "doi.org/", "dx.doi.org/", "doi:"):
         if doi.startswith(_prefix):
             doi = doi[len(_prefix):]
+            break
+    # Reject anything that doesn't match the documented DOI pattern before
+    # we start hitting external APIs. Saves a round-trip on typos and keeps
+    # the runtime contract aligned with the schema's `params.doi.pattern`.
+    if not _DOI_RE.match(doi):
+        return {
+            "doi": doi,
+            "success": False,
+            "source": None,
+            "pdf_url": None,
+            "file": None,
+            "meta": {},
+            "sources_tried": [],
+            "error": {
+                "code": "validation_error",
+                "message": f"Not a valid DOI: {doi!r} (expected pattern {DOI_PATTERN})",
+                "retryable": False,
+            },
+        }
     _progress("start", doi=doi)
 
     sources_tried: list[str] = []
     meta: dict = {}
     download_errors: list[dict] = []
 
-    # Fatal download errors that abort the fallback loop (machine-local, not URL-specific).
-    FATAL_DL_ERRORS = ("size_exceeded", "io_error")
+    # Fatal download errors that abort the fallback loop. Only host-independent
+    # local failures qualify (e.g., disk write failed). ``size_exceeded`` is per-URL,
+    # so a bloated copy from one source should not prevent trying a smaller copy from another.
+    FATAL_DL_ERRORS = ("io_error",)
 
     def _merge_meta(extra: dict) -> list[str]:
         added: list[str] = []
@@ -1022,21 +1131,32 @@ def fetch(
             _progress("source_miss", doi=doi, source="publisher_direct", reason="no_template_for_doi_prefix")
 
     # --- Sci-Hub fallback (last resort) ---
-    # Runs only when every other source has missed (no candidates and no
-    # prior download attempts). Mirror list comes from PAPER_FETCH_SCIHUB_MIRRORS
-    # or the built-in defaults; exhaustion triggers a one-shot scan of
-    # SCIHUB_DISCOVERY_URL for fresh mirrors. Disabled with PAPER_FETCH_NO_SCIHUB=1.
-    if _is_scihub_enabled() and not candidates and not download_errors:
+    # Mirror list comes from PAPER_FETCH_SCIHUB_MIRRORS or the built-in defaults;
+    # exhaustion triggers a one-shot scan of SCIHUB_DISCOVERY_URL for fresh mirrors.
+    # Disabled with PAPER_FETCH_NO_SCIHUB=1.
+    def _try_scihub_resolve() -> str | None:
+        if not _is_scihub_enabled():
+            return None
+        if "scihub" in sources_tried:
+            return None
         _progress("source_try", doi=doi, source="scihub")
         sources_tried.append("scihub")
         sh_hit = try_scihub(doi, timeout=timeout)
-        if sh_hit:
-            sh_url, sh_mirror = sh_hit
-            source_details["scihub"] = {"mirror": sh_mirror}
-            _progress("source_hit", doi=doi, source="scihub", pdf_url=sh_url, mirror=sh_mirror)
-            _add("scihub", sh_url)
-        else:
+        if not sh_hit:
             _progress("source_miss", doi=doi, source="scihub")
+            return None
+        sh_url, sh_mirror = sh_hit
+        source_details["scihub"] = {"mirror": sh_mirror}
+        _progress("source_hit", doi=doi, source="scihub", pdf_url=sh_url, mirror=sh_mirror)
+        return sh_url
+
+    # First Sci-Hub pass: runs when no OA candidates resolved at all (regardless
+    # of whether Unpaywall produced a non-fatal download error). The download
+    # loop below treats Sci-Hub like any other candidate.
+    if not candidates:
+        sh_url = _try_scihub_resolve()
+        if sh_url:
+            _add("scihub", sh_url)
 
     # --- Exhausted all sources with no candidates and no prior attempts → not_found ---
     if not candidates and not download_errors:
@@ -1081,6 +1201,7 @@ def fetch(
         return _success(src0, url0, {"skipped": True, "skip_reason": "file_exists"})
 
     # --- Fallback download loop ---
+    fatal_seen = False
     for cand_src, cand_url in candidates:
         dl_err = _download(cand_url, dest, timeout=timeout)
         if dl_err is None:
@@ -1088,7 +1209,23 @@ def fetch(
             return _success(cand_src, cand_url, {"candidates": [{"source": s, "url": u} for s, u in candidates]})
         download_errors.append({"source": cand_src, "url": cand_url, "reason": dl_err})
         if dl_err in FATAL_DL_ERRORS:
+            fatal_seen = True
             break
+
+    # Second Sci-Hub pass: every OA candidate produced a URL but none of them
+    # could actually be downloaded (e.g. CAPTCHA, broken link, blocked host).
+    # Try Sci-Hub now if it hasn't already been attempted, and if no fatal
+    # local error (io_error) terminated the loop.
+    if not fatal_seen and "scihub" not in sources_tried:
+        sh_url = _try_scihub_resolve()
+        if sh_url and sh_url not in attempted_urls:
+            attempted_urls.add(sh_url)
+            candidates.append(("scihub", sh_url))
+            dl_err = _download(sh_url, dest, timeout=timeout)
+            if dl_err is None:
+                _progress("download_ok", doi=doi, file=str(dest), source="scihub")
+                return _success("scihub", sh_url, {"candidates": [{"source": s, "url": u} for s, u in candidates]})
+            download_errors.append({"source": "scihub", "url": sh_url, "reason": dl_err})
 
     return _download_failure(doi, meta, sources_tried, download_errors, candidates=candidates)
 
@@ -1141,7 +1278,7 @@ def build_schema() -> dict:
                 "type": "string",
                 "required": False,
                 "description": "DOI to fetch (positional). Use '-' to read DOIs line-by-line from stdin.",
-                "pattern": "^10\\..+/.+$",
+                "pattern": DOI_PATTERN,
                 "example": "10.1038/s41586-020-2649-2",
             },
             "batch": {
@@ -1310,6 +1447,7 @@ def _default_format() -> str:
 
 def _decide_exit(results: list[dict]) -> int:
     """Pick the most descriptive exit code from per-item outcomes."""
+    any_validation = False
     any_transport = False
     any_unresolved = False
     any_failure = False
@@ -1319,7 +1457,9 @@ def _decide_exit(results: list[dict]) -> int:
         any_failure = True
         err = r.get("error") or {}
         code = err.get("code", "")
-        if code == "not_found":
+        if code == "validation_error":
+            any_validation = True
+        elif code == "not_found":
             any_unresolved = True
         elif code.startswith("download_"):
             any_transport = True
@@ -1327,27 +1467,35 @@ def _decide_exit(results: list[dict]) -> int:
             any_unresolved = True
     if not any_failure:
         return EXIT_SUCCESS
+    # Validation errors win over transport/unresolved: a malformed DOI is a
+    # caller bug, not a transient network issue.
+    if any_validation and not (any_transport or any_unresolved):
+        return EXIT_VALIDATION
     if any_transport:
         return EXIT_TRANSPORT
-    if any_unresolved:
-        return EXIT_UNRESOLVED
     return EXIT_UNRESOLVED
 
 
 def _next_hints(results: list[dict], args) -> list[str]:
-    """Suggest follow-up commands for the failed subset."""
+    """Suggest follow-up commands for the failed subset.
+
+    Hints are intended for an agent or human to copy-paste and run, so all
+    user-controlled values (DOIs, --out path) are shell-quoted to prevent
+    a maliciously crafted DOI from injecting commands.
+    """
     failed = [r["doi"] for r in results if not r.get("success")]
     if not failed:
         return []
-    out = args.out
+    out = shlex.quote(args.out)
     if len(failed) == 1:
-        cmd = f"paper-fetch {failed[0]} --out {out}"
+        cmd = f"paper-fetch {shlex.quote(failed[0])} --out {out}"
         if args.dry_run:
             cmd += " --dry-run"
         return [cmd]
-    # Multiple failures — suggest piping the failed DOIs back in.
-    joined = "\\n".join(failed)
-    cmd = f"printf '{joined}\\n' | paper-fetch --batch - --out {out}"
+    # Multiple failures — feed them via stdin so each DOI is delimited by a
+    # real newline rather than interpolated into the shell command.
+    payload = shlex.quote("\n".join(failed) + "\n")
+    cmd = f"printf %s {payload} | paper-fetch --batch - --out {out}"
     if args.dry_run:
         cmd += " --dry-run"
     return [cmd]

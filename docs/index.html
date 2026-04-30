@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>paper-fetch — Legal Open-Access PDF Downloader</title>
-  <meta name="description" content="Claude Code skill for downloading paper PDFs from a DOI via legal open-access sources. Unpaywall, Semantic Scholar, arXiv, PMC, bioRxiv. All disciplines. Zero dependencies.">
+  <title>paper-fetch — Open-Access PDF Downloader</title>
+  <meta name="description" content="Claude Code skill for downloading paper PDFs from a DOI. Six-source fallback chain: Unpaywall, Semantic Scholar, arXiv, PMC, bioRxiv, plus Sci-Hub as last-resort (opt-out via PAPER_FETCH_NO_SCIHUB=1). All disciplines. Zero dependencies.">
   <meta name="theme-color" content="#0d1117">
   <link rel="canonical" href="https://agents365-ai.github.io/paper-fetch/">
   <link rel="alternate" hreflang="zh" href="https://agents365-ai.github.io/paper-fetch/zh.html">
   <link rel="alternate" hreflang="en" href="https://agents365-ai.github.io/paper-fetch/">
-  <meta property="og:title" content="paper-fetch — Legal Open-Access PDF Downloader">
-  <meta property="og:description" content="Fetch paper PDFs from a DOI via Unpaywall, Semantic Scholar, arXiv, PMC, bioRxiv. All disciplines. Never Sci-Hub.">
+  <meta property="og:title" content="paper-fetch — Open-Access PDF Downloader">
+  <meta property="og:description" content="Fetch paper PDFs from a DOI via Unpaywall, Semantic Scholar, arXiv, PMC, bioRxiv, with Sci-Hub as last-resort fallback (opt-out).">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://agents365-ai.github.io/paper-fetch/">
   <meta name="twitter:card" content="summary">
@@ -210,9 +210,9 @@
   <!-- Hero -->
   <div class="hero">
     <div class="container">
-      <div class="hero-badge">5-Source Legal OA Fallback Chain</div>
+      <div class="hero-badge">6-Source Fallback Chain &middot; OA-First, Sci-Hub Last-Resort</div>
       <h1>paper-<span>fetch</span></h1>
-      <p>DOI in, PDF out. A Claude Code skill that resolves paper PDFs through Unpaywall, Semantic Scholar, arXiv, PubMed Central, and bioRxiv &mdash; legally, across every discipline, with zero dependencies.</p>
+      <p>DOI in, PDF out. A Claude Code skill that resolves paper PDFs through Unpaywall, Semantic Scholar, arXiv, PubMed Central, bioRxiv/medRxiv, and finally Sci-Hub mirrors as a last resort &mdash; across every discipline, with zero dependencies. Disable the Sci-Hub fallback with <code>PAPER_FETCH_NO_SCIHUB=1</code>.</p>
       <div class="hero-install">
         <code id="install-cmd">git clone https://github.com/Agents365-ai/paper-fetch.git ~/.claude/skills/paper-fetch</code>
         <button class="copy-btn" onclick="copyInstall()">Copy</button>
@@ -229,12 +229,12 @@
   <section>
     <div class="container">
       <h2 class="section-title">Why This Skill</h2>
-      <p class="section-sub">A deterministic, legal-only replacement for ad-hoc "can you find this PDF" requests.</p>
+      <p class="section-sub">A deterministic replacement for ad-hoc "can you find this PDF" requests.</p>
       <div class="features-grid">
         <div class="feature-card">
           <div class="feature-icon">&#x1F517;</div>
-          <h3>5-Source Fallback Chain</h3>
-          <p>Unpaywall &rarr; Semantic Scholar &rarr; arXiv &rarr; PubMed Central &rarr; bioRxiv/medRxiv. Stops at the first hit, reports failure with metadata if none found.</p>
+          <h3>6-Source Fallback Chain</h3>
+          <p>Unpaywall &rarr; Semantic Scholar &rarr; arXiv &rarr; PubMed Central &rarr; bioRxiv/medRxiv &rarr; Sci-Hub mirrors. Stops at the first valid PDF, reports failure with metadata if none found.</p>
         </div>
         <div class="feature-card">
           <div class="feature-icon">&#x1F310;</div>
@@ -243,8 +243,8 @@
         </div>
         <div class="feature-card">
           <div class="feature-icon">&#x1F6E1;&#xFE0F;</div>
-          <h3>Legal Only, Always</h3>
-          <p>Never touches Sci-Hub or any paywall bypass. If no OA copy exists, the skill fails honestly and returns title + authors for ILL requests.</p>
+          <h3>OA First, Sci-Hub Last-Resort</h3>
+          <p>Tries every legal open-access source before falling back to Sci-Hub. Mobile-UA fetches with 1 req/s pacing. Disable entirely with <code>PAPER_FETCH_NO_SCIHUB=1</code>; pin specific mirrors with <code>PAPER_FETCH_SCIHUB_MIRRORS</code>.</p>
         </div>
         <div class="feature-card">
           <div class="feature-icon">&#x26A1;</div>
@@ -306,6 +306,13 @@
             <p>If the DOI prefix is <code>10.1101</code>, queries <code>api.biorxiv.org/details/{server}/{doi}</code> for the latest-version PDF URL. Biology and medicine preprints.</p>
           </div>
         </div>
+        <div class="chain-step">
+          <div class="chain-num">6</div>
+          <div class="chain-body">
+            <h4>Sci-Hub mirrors (last resort)</h4>
+            <p>Iterates the configured mirror list (<code>sci-hub.ru</code>, <code>.st</code>, <code>.se</code>, &hellip;) only when every OA source missed. Mobile-UA fetches throttled to 1 req/s; short-circuits when the page reports the paper is not in the corpus. Disable with <code>PAPER_FETCH_NO_SCIHUB=1</code>; override mirrors with <code>PAPER_FETCH_SCIHUB_MIRRORS</code>.</p>
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -346,7 +353,7 @@
           <tr><th>Feature</th><th>Native Agent</th><th>This Skill</th></tr>
         </thead>
         <tbody>
-          <tr><td>DOI resolution strategy</td><td class="cross">Ad-hoc web search</td><td class="check">&#x2713; Deterministic 5-source chain</td></tr>
+          <tr><td>DOI resolution strategy</td><td class="cross">Ad-hoc web search</td><td class="check">&#x2713; Deterministic 6-source chain</td></tr>
           <tr><td>Unpaywall integration</td><td class="cross">&#x2717;</td><td class="check">&#x2713; Highest OA hit rate</td></tr>
           <tr><td>arXiv / PMC / bioRxiv fallback</td><td class="cross">Manual</td><td class="check">&#x2713; Automatic</td></tr>
           <tr><td>Batch download</td><td class="cross">&#x2717;</td><td class="check">&#x2713; <code>--batch dois.txt</code> or <code>--batch -</code> (stdin)</td></tr>
@@ -359,7 +366,7 @@
           <tr><td>Host allowlist safety</td><td class="cross">&#x2717;</td><td class="check">&#x2713; Restricted to known OA domains</td></tr>
           <tr><td>50 MB size cap</td><td class="cross">&#x2717;</td><td class="check">&#x2713; Prevents runaway downloads</td></tr>
           <tr><td>PDF header validation</td><td class="cross">&#x2717;</td><td class="check">&#x2713; Rejects HTML landing pages</td></tr>
-          <tr><td>Legal-only guarantee</td><td class="cross">None</td><td class="check">&#x2713; Hard refuses paywall bypass</td></tr>
+          <tr><td>Sci-Hub last-resort fallback</td><td class="cross">None</td><td class="check">&#x2713; Mobile-UA, 1 req/s pacing, opt-out via <code>PAPER_FETCH_NO_SCIHUB=1</code></td></tr>
           <tr><td>Dependencies</td><td class="cross">Varies</td><td class="check">&#x2713; Python stdlib only</td></tr>
           <tr><td>Works across all disciplines</td><td class="cross">Varies</td><td class="check">&#x2713; Any field</td></tr>
         </tbody>
@@ -471,7 +478,7 @@ python scripts/fetch.py schema --pretty</pre>
         <a href="https://github.com/Agents365-ai">Agents365-ai</a>
       </p>
       <p style="margin-top: 8px; font-size: 12px;">
-        Never uses Sci-Hub or any paywall bypass. Open access only.
+        Open-access first. Sci-Hub mirrors are tried only as a last resort &mdash; disable with <code>PAPER_FETCH_NO_SCIHUB=1</code>.
       </p>
     </div>
   </footer>
