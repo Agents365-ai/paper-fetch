@@ -557,12 +557,19 @@ def try_biorxiv(doi: str, *, timeout: int) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Title → DOI resolver (Crossref)
+# Title → DOI resolvers (Crossref + Semantic Scholar fallback)
 # ---------------------------------------------------------------------------
 
-# Minimum title length we'll send to Crossref. Anything shorter is almost
+# Minimum title length we'll send to a resolver. Anything shorter is almost
 # certainly a typo or one-word query that will return noise.
 _MIN_TITLE_LEN = 6
+
+# Heuristic confidence thresholds for Crossref's relevance score. The score
+# is unitless and scales with title length, so these are calibrated to be
+# permissive — anything obviously sloppy still produces a low_confidence
+# flag rather than silently picking the wrong paper.
+TITLE_SCORE_MIN = 40.0   # absolute floor; below this the top is suspect
+TITLE_GAP_MIN = 3.0      # gap from top to runner-up; below this the top is ambiguous
 
 
 def try_crossref_title(title: str, *, timeout: int) -> tuple[str | None, dict, list[dict]]:
@@ -629,6 +636,62 @@ def try_crossref_title(title: str, *, timeout: int) -> tuple[str | None, dict, l
     top = candidates[0]
     top_meta = {k: v for k, v in top.items() if k != "doi"}
     return top.get("doi"), top_meta, candidates
+
+
+def try_semantic_scholar_match(title: str, *, timeout: int) -> tuple[str | None, dict]:
+    """Resolve a title to a DOI via Semantic Scholar's ``/paper/search/match``.
+
+    S2's match endpoint returns at most one paper — its closest title in the
+    corpus. Better than the relevance endpoint for our use case because we
+    want exactness, not breadth. Critically, S2's corpus includes arXiv-only
+    papers that never get a Crossref DOI; for those we synthesize the
+    canonical arXiv DOI ``10.48550/arXiv.{id}`` so the downstream fetch
+    chain treats the result uniformly.
+
+    Returns ``(doi, meta)``. ``meta`` carries ``title``, ``year``, ``author``,
+    ``journal``, ``paper_id``, and ``external_ids`` for caller transparency.
+    """
+    q = title.strip()
+    if len(q) < _MIN_TITLE_LEN:
+        return None, {}
+    params = {
+        "query": q,
+        "fields": "title,authors,year,venue,externalIds",
+    }
+    url = "https://api.semanticscholar.org/graph/v1/paper/search/match?" + urllib.parse.urlencode(params)
+    try:
+        d = _get_json(url, timeout=timeout)
+    except Exception as e:
+        # 404 (no match) is the expected miss path here — the helper logs
+        # the same way for any failure since the caller treats them as miss.
+        _progress("title_resolver_miss", resolver="semantic_scholar", reason=str(e))
+        return None, {}
+
+    items = d.get("data") or []
+    if not items:
+        return None, {}
+    top = items[0]
+    ext = top.get("externalIds") or {}
+    doi = ext.get("DOI")
+    if not doi and ext.get("ArXiv"):
+        # arXiv assigns DataCite DOIs as 10.48550/arXiv.<id> (since 2022;
+        # for older preprints the DOI may not be registered, but the fetch
+        # chain's arXiv source resolver doesn't need a registered DOI —
+        # it builds the PDF URL from the arXiv id itself once S2 / Unpaywall
+        # surface it via externalIds during the download phase).
+        doi = f"10.48550/arXiv.{ext['ArXiv']}"
+    if not doi:
+        return None, {}
+    authors = top.get("authors") or []
+    return doi, {
+        "doi": doi,
+        "title": top.get("title"),
+        "year": top.get("year"),
+        "author": authors[0].get("name") if authors else None,
+        "journal": top.get("venue") or None,
+        "paper_id": top.get("paperId"),
+        "external_ids": ext,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1450,7 +1513,7 @@ def build_schema() -> dict:
             "cli_version": "Version of the paper-fetch binary that produced the envelope.",
             "auth_mode": "Either 'public' (OA sources, no client rate limit) or 'institutional' (user opted in via PAPER_FETCH_INSTITUTIONAL=1; 1 req/s rate limit to protect the operator's IP from publisher-side throttling).",
             "sources_tried": "Union of sources consulted across all DOIs in this run.",
-            "title_resolution": "Present only when --title was used. Includes the original query, resolver (currently 'crossref'), top-3 candidate matches with score, and the resolved DOI. Agents should sanity-check the top match against the candidates before treating the download as authoritative.",
+            "title_resolution": "Present only when --title was used. Includes: query, resolver (the resolver whose match was used: 'crossref' or 'semantic_scholar'), resolvers_tried (ordered list of every resolver consulted), resolved_doi, resolved_title, match_score (Crossref relevance score; absent for S2 matches), candidates (top-3 from the winning resolver), low_confidence (true if the chosen DOI failed the score/gap heuristics), low_confidence_reason ('score_below_threshold' / 'ambiguous_runner_up' / 'no_match'), fallback_reason (why Crossref's match was rejected when S2 was used), and crossref_candidates (top-3 Crossref hits when the S2 fallback won, for cross-resolver inspection). Agents should sanity-check the top match — especially when low_confidence is true.",
         },
         "env": {
             "UNPAYWALL_EMAIL": "Optional. Contact email for Unpaywall API. If unset, Unpaywall is skipped.",
@@ -1531,34 +1594,127 @@ def _load_dois_from_args(args) -> list[str] | dict:
     return dois
 
 
-def _resolve_title(title: str, *, timeout: int) -> tuple[str | None, dict]:
-    """Resolve a title to a DOI via Crossref; emit progress events.
+def _classify_low_confidence(score: float | None, gap: float | None) -> str | None:
+    """Identify why a Crossref top match should be treated as low-confidence.
 
-    Returns (doi_or_none, resolution_meta). resolution_meta is always populated
-    (with at least a ``query`` key) so callers can surface it in the result
-    envelope's meta slot for transparency / agent verification.
+    Returns a single short reason string, or None if both heuristics pass.
+    Order matters: ``score_below_threshold`` is the more diagnostic signal,
+    so report that first when both fire.
+    """
+    if score is not None and score < TITLE_SCORE_MIN:
+        return "score_below_threshold"
+    if gap is not None and gap < TITLE_GAP_MIN:
+        return "ambiguous_runner_up"
+    return None
+
+
+def _resolve_title(title: str, *, timeout: int) -> tuple[str | None, dict]:
+    """Resolve a title to a DOI via Crossref → Semantic Scholar fallback chain.
+
+    Always populates a ``resolution_meta`` dict (at least ``query`` and
+    ``resolvers_tried``) so callers can surface it in the envelope's meta slot.
     """
     _progress("title_resolve_try", query=title)
-    doi, top_meta, candidates = try_crossref_title(title, timeout=timeout)
-    res_meta = {
-        "query": title,
-        "resolver": "crossref",
-        "candidates": candidates,
-    }
-    if not doi:
-        _progress("title_resolve_miss", query=title)
-        return None, res_meta
-    res_meta["resolved_doi"] = doi
-    res_meta["resolved_title"] = top_meta.get("title")
-    res_meta["match_score"] = top_meta.get("score")
+    resolvers_tried: list[str] = []
+
+    # Pass 1 — Crossref. Confident hit short-circuits the chain.
+    resolvers_tried.append("crossref")
+    cr_doi, cr_top, cr_candidates = try_crossref_title(title, timeout=timeout)
+    cr_score = cr_top.get("score") if cr_top else None
+    cr_gap: float | None = None
+    if len(cr_candidates) >= 2:
+        s0 = cr_candidates[0].get("score")
+        s1 = cr_candidates[1].get("score")
+        if isinstance(s0, (int, float)) and isinstance(s1, (int, float)):
+            cr_gap = float(s0) - float(s1)
+    cr_low_reason = _classify_low_confidence(cr_score, cr_gap) if cr_doi else "no_match"
+
+    if cr_doi and cr_low_reason is None:
+        _progress(
+            "title_resolve_hit",
+            query=title,
+            resolver="crossref",
+            doi=cr_doi,
+            title=cr_top.get("title"),
+            score=cr_score,
+        )
+        return cr_doi, {
+            "query": title,
+            "resolver": "crossref",
+            "resolvers_tried": resolvers_tried,
+            "resolved_doi": cr_doi,
+            "resolved_title": cr_top.get("title"),
+            "match_score": cr_score,
+            "candidates": cr_candidates,
+            "low_confidence": False,
+        }
+
+    # Pass 2 — Semantic Scholar match endpoint. Covers arXiv-only papers
+    # (no Crossref DOI) and rescues low-confidence Crossref matches.
     _progress(
-        "title_resolve_hit",
+        "title_resolver_try",
         query=title,
-        doi=doi,
-        title=top_meta.get("title"),
-        score=top_meta.get("score"),
+        resolver="semantic_scholar",
+        reason="crossref_" + cr_low_reason if cr_low_reason else "crossref_no_match",
     )
-    return doi, res_meta
+    resolvers_tried.append("semantic_scholar")
+    s2_doi, s2_meta = try_semantic_scholar_match(title, timeout=timeout)
+    if s2_doi:
+        _progress(
+            "title_resolve_hit",
+            query=title,
+            resolver="semantic_scholar",
+            doi=s2_doi,
+            title=s2_meta.get("title"),
+        )
+        out: dict = {
+            "query": title,
+            "resolver": "semantic_scholar",
+            "resolvers_tried": resolvers_tried,
+            "resolved_doi": s2_doi,
+            "resolved_title": s2_meta.get("title"),
+            "candidates": [s2_meta],
+            "low_confidence": False,
+            "fallback_reason": cr_low_reason,
+        }
+        # Preserve the Crossref candidate list so an agent can compare what
+        # each resolver thought was the top hit (helps when the two disagree).
+        if cr_candidates:
+            out["crossref_candidates"] = cr_candidates
+        return s2_doi, out
+
+    # Pass 3 — every resolver missed. If Crossref had *any* candidate, return
+    # it with a low_confidence flag so the agent can either (a) proceed with
+    # caution or (b) bail out via the dry-run preview.
+    if cr_doi:
+        _progress(
+            "title_resolve_hit",
+            query=title,
+            resolver="crossref",
+            doi=cr_doi,
+            title=cr_top.get("title"),
+            score=cr_score,
+            low_confidence=True,
+            reason=cr_low_reason,
+        )
+        return cr_doi, {
+            "query": title,
+            "resolver": "crossref",
+            "resolvers_tried": resolvers_tried,
+            "resolved_doi": cr_doi,
+            "resolved_title": cr_top.get("title"),
+            "match_score": cr_score,
+            "candidates": cr_candidates,
+            "low_confidence": True,
+            "low_confidence_reason": cr_low_reason,
+        }
+
+    _progress("title_resolve_miss", query=title, resolvers_tried=resolvers_tried)
+    return None, {
+        "query": title,
+        "resolvers_tried": resolvers_tried,
+        "candidates": [],
+    }
 
 
 def _default_format() -> str:

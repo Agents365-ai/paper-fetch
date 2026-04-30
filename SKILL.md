@@ -32,7 +32,13 @@ If the pull fails (offline, conflict, not a git checkout, the working tree is di
 7. **Sci-Hub mirrors** *(on by default; disable with `PAPER_FETCH_NO_SCIHUB=1`)* — last-resort fallback. Tries the mirror list in `PAPER_FETCH_SCIHUB_MIRRORS` (or built-in defaults `sci-hub.ru`, `sci-hub.st`, `sci-hub.su`, `sci-hub.box`, `sci-hub.red`, `sci-hub.al`, `sci-hub.mk`, `sci-hub.ee`) in order; on full miss, scrapes `https://www.sci-hub.pub/` once per process for fresh mirrors. CAPTCHA / missing-paper pages have no PDF iframe and fall through silently.
 8. Otherwise → report failure with title/authors so the user can request via ILL
 
-If only a title is given, pass it directly via `--title "<title>"` — the CLI resolves the title to a DOI via Crossref before running the download chain. The resolved DOI, the top match, and up to 3 candidates are surfaced under `meta.title_resolution` so an agent can sanity-check before treating the download as authoritative.
+If only a title is given, pass it directly via `--title "<title>"`. Resolution chain:
+
+1. **Crossref** `query.title` — primary; covers all major journal/conference DOIs
+2. **Semantic Scholar `/paper/search/match`** — fallback when Crossref's top match is low-confidence (`match_score < 40`) or the gap to the runner-up is `< 3`. Critically, S2 covers arXiv-only preprints (no Crossref DOI). When S2 surfaces a paper that has only an arXiv id, the canonical `10.48550/arXiv.<id>` is synthesized so the download chain stays uniform.
+3. **Crossref's best guess (low-confidence)** — used only when both resolvers struggled. The result envelope sets `meta.title_resolution.low_confidence: true` plus a `low_confidence_reason` (`score_below_threshold` / `ambiguous_runner_up`) so an agent can either bail or confirm via `--dry-run`.
+
+Either way the resolved DOI, the winning resolver, the full `resolvers_tried` list, and the top candidate matches are all surfaced under `meta.title_resolution`.
 
 ## Usage
 
