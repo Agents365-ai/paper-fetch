@@ -32,12 +32,13 @@ If the pull fails (offline, conflict, not a git checkout, the working tree is di
 7. **Sci-Hub mirrors** *(on by default; disable with `PAPER_FETCH_NO_SCIHUB=1`)* — last-resort fallback. Tries the mirror list in `PAPER_FETCH_SCIHUB_MIRRORS` (or built-in defaults `sci-hub.ru`, `sci-hub.st`, `sci-hub.su`, `sci-hub.box`, `sci-hub.red`, `sci-hub.al`, `sci-hub.mk`, `sci-hub.ee`) in order; on full miss, scrapes `https://www.sci-hub.pub/` once per process for fresh mirrors. CAPTCHA / missing-paper pages have no PDF iframe and fall through silently.
 8. Otherwise → report failure with title/authors so the user can request via ILL
 
-If only a title is given, resolve to a DOI first via Semantic Scholar `search_paper_by_title` (asta MCP) or Crossref.
+If only a title is given, pass it directly via `--title "<title>"` — the CLI resolves the title to a DOI via Crossref before running the download chain. The resolved DOI, the top match, and up to 3 candidates are surfaced under `meta.title_resolution` so an agent can sanity-check before treating the download as authoritative.
 
 ## Usage
 
 ```bash
 python scripts/fetch.py <DOI> [options]
+python scripts/fetch.py --title "<paper title>" [options]
 python scripts/fetch.py --batch <FILE|-> [options]
 python scripts/fetch.py schema           # machine-readable self-description
 ```
@@ -47,6 +48,7 @@ python scripts/fetch.py schema           # machine-readable self-description
 | Flag | Default | Description |
 |------|---------|-------------|
 | `doi` | — | DOI to fetch (positional). Use `-` to read a single DOI from stdin |
+| `--title TITLE` | — | Paper title; resolved to a DOI via Crossref before download. Mutually exclusive with positional DOI / `--batch` |
 | `--batch FILE` | — | File with one DOI per line for bulk download. Use `-` to read from stdin |
 | `--out DIR` | `pdfs` | Output directory |
 | `--dry-run` | off | Resolve sources without downloading; preview PDF URL and destination |
@@ -204,6 +206,7 @@ Every retryable error carries a `retry_after_hours` hint in the error object, so
 | Code | Meaning | Retryable | `retry_after_hours` |
 |------|---------|-----------|---------------------|
 | `validation_error` | Bad arguments or empty input | No | — |
+| `title_resolve_failed` | Crossref returned no items for the given `--title` query (try a longer / cleaner title, or pass the DOI directly) | No | — |
 | `not_found` | No open-access PDF found | Yes | `168` (one week — OA lands on embargo / preprint timescale) |
 | `download_network_error` | Network failure during download | Yes | `1` |
 | `download_not_a_pdf` | Response was not a PDF (HTML landing page) | No | — |
@@ -220,8 +223,14 @@ The canonical mapping lives in `RETRY_AFTER_HOURS` in `scripts/fetch.py` and is 
 # Single DOI (JSON output when piped; text when in a terminal)
 python scripts/fetch.py 10.1038/s41586-020-2649-2
 
+# Single title (resolved to DOI via Crossref, then downloaded)
+python scripts/fetch.py --title "Highly accurate protein structure prediction with AlphaFold"
+
 # Dry-run preview (resolve without downloading)
 python scripts/fetch.py 10.1038/s41586-020-2649-2 --dry-run
+
+# Title + dry-run — preview the resolved DOI and candidate matches
+python scripts/fetch.py --title "Attention Is All You Need" --dry-run
 
 # Force JSON (for agents even inside a terminal)
 python scripts/fetch.py 10.1038/s41586-020-2649-2 --format json

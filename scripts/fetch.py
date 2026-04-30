@@ -557,6 +557,81 @@ def try_biorxiv(doi: str, *, timeout: int) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Title → DOI resolver (Crossref)
+# ---------------------------------------------------------------------------
+
+# Minimum title length we'll send to Crossref. Anything shorter is almost
+# certainly a typo or one-word query that will return noise.
+_MIN_TITLE_LEN = 6
+
+
+def try_crossref_title(title: str, *, timeout: int) -> tuple[str | None, dict, list[dict]]:
+    """Resolve a paper title to a DOI via Crossref.
+
+    Crossref's relevance score is unitless and scales with title length, so we
+    don't gate on an absolute threshold — we hand the top match plus the
+    top 3 candidates back to the caller so an agent can sanity-check.
+
+    Returns ``(top_doi, top_meta, candidates)``:
+      - ``top_doi``: best-match DOI, or ``None`` if Crossref returned no items
+      - ``top_meta``: ``{title, year, author, journal, score}`` for the top hit
+      - ``candidates``: list of up to 3 candidate dicts in score order
+    """
+    q = title.strip()
+    if len(q) < _MIN_TITLE_LEN:
+        return None, {}, []
+    # query.title outranks query.bibliographic for this use case: the input is
+    # explicitly a paper title, and bibliographic mode also weights authors/year
+    # equally — empirically that demoted the canonical AlphaFold paper below
+    # secondary "Faculty Opinions recommendation of ..." entries that share
+    # all the user's title tokens.
+    params = {
+        "query.title": q,
+        "rows": "3",
+        "select": "DOI,title,score,author,issued,container-title",
+    }
+    # Crossref's polite pool gives priority to requests that identify the
+    # caller via mailto. We already pass UA but also include mailto when the
+    # operator set UNPAYWALL_EMAIL, since the same address is theirs.
+    if EMAIL:
+        params["mailto"] = EMAIL
+    url = "https://api.crossref.org/works?" + urllib.parse.urlencode(params)
+    try:
+        data = _get_json(url, timeout=timeout)
+    except Exception as e:
+        _progress("title_resolve_failed", reason=str(e))
+        return None, {}, []
+
+    items = ((data.get("message") or {}).get("items")) or []
+    if not items:
+        return None, {}, []
+
+    candidates: list[dict] = []
+    for it in items[:3]:
+        title_list = it.get("title") or []
+        author_list = it.get("author") or []
+        first_author = ""
+        if author_list:
+            a0 = author_list[0]
+            first_author = a0.get("family") or a0.get("name") or ""
+        issued = ((it.get("issued") or {}).get("date-parts") or [[None]])[0]
+        year = issued[0] if issued and issued[0] else None
+        cont = it.get("container-title") or []
+        candidates.append({
+            "doi": it.get("DOI"),
+            "title": title_list[0] if title_list else None,
+            "year": year,
+            "author": first_author or None,
+            "journal": cont[0] if cont else None,
+            "score": it.get("score"),
+        })
+
+    top = candidates[0]
+    top_meta = {k: v for k, v in top.items() if k != "doi"}
+    return top.get("doi"), top_meta, candidates
+
+
+# ---------------------------------------------------------------------------
 # Publisher-direct fallback (institutional mode only)
 # ---------------------------------------------------------------------------
 # When the five OA sources all miss and the operator has opted into
@@ -1281,6 +1356,12 @@ def build_schema() -> dict:
                 "pattern": DOI_PATTERN,
                 "example": "10.1038/s41586-020-2649-2",
             },
+            "title": {
+                "type": "string",
+                "required": False,
+                "description": "Paper title; resolved to a DOI via Crossref before download. Mutually exclusive with positional DOI / --batch. The resolved DOI, top match, and up to 3 candidates are surfaced under meta.title_resolution.",
+                "example": "Highly accurate protein structure prediction with AlphaFold",
+            },
             "batch": {
                 "type": "path",
                 "required": False,
@@ -1345,6 +1426,7 @@ def build_schema() -> dict:
         "error_codes": {
             "validation_error": {"retryable": False, "message": "Bad arguments or empty input"},
             "not_found": {"retryable": True, "retry_after_hours": RETRY_AFTER_HOURS["not_found"], "message": "No OA PDF found anywhere; OA availability changes over time"},
+            "title_resolve_failed": {"retryable": False, "message": "Crossref returned no items for the given title; provide a DOI directly or refine the title"},
             "download_network_error": {"retryable": True, "retry_after_hours": RETRY_AFTER_HOURS["download_network_error"], "message": "Network failure during download"},
             "download_not_a_pdf": {"retryable": False, "message": "Response was not a PDF (HTML landing page)"},
             "download_host_not_allowed": {"retryable": False, "message": "PDF URL failed SSRF safety check (private IP, non-http(s) scheme, non-80/443 port, or blocked metadata host)"},
@@ -1368,6 +1450,7 @@ def build_schema() -> dict:
             "cli_version": "Version of the paper-fetch binary that produced the envelope.",
             "auth_mode": "Either 'public' (OA sources, no client rate limit) or 'institutional' (user opted in via PAPER_FETCH_INSTITUTIONAL=1; 1 req/s rate limit to protect the operator's IP from publisher-side throttling).",
             "sources_tried": "Union of sources consulted across all DOIs in this run.",
+            "title_resolution": "Present only when --title was used. Includes the original query, resolver (currently 'crossref'), top-3 candidate matches with score, and the resolved DOI. Agents should sanity-check the top match against the candidates before treating the download as authoritative.",
         },
         "env": {
             "UNPAYWALL_EMAIL": "Optional. Contact email for Unpaywall API. If unset, Unpaywall is skipped.",
@@ -1411,7 +1494,17 @@ examples:
 
 
 def _load_dois_from_args(args) -> list[str] | dict:
-    """Parse DOI input from args. Returns list of DOIs or an error envelope dict."""
+    """Parse DOI input from args. Returns list of DOIs or an error envelope dict.
+
+    Title resolution (``--title``) is handled separately by ``_resolve_title``
+    in main(); this loader sees only the resolved DOI by then.
+    """
+    inputs = [bool(args.batch), bool(args.doi), bool(getattr(args, "title", None))]
+    if sum(inputs) > 1:
+        return _envelope_err(
+            "validation_error",
+            "Pass exactly one of: positional DOI, --batch FILE, or --title TITLE.",
+        )
     if args.batch:
         if args.batch == "-":
             text = sys.stdin.read()
@@ -1431,11 +1524,41 @@ def _load_dois_from_args(args) -> list[str] | dict:
     elif args.doi:
         dois = [args.doi]
     else:
-        return _envelope_err("validation_error", "Provide a DOI or --batch file")
+        return _envelope_err("validation_error", "Provide a DOI, --title, or --batch file")
 
     if not dois:
         return _envelope_err("validation_error", "No DOIs found in input")
     return dois
+
+
+def _resolve_title(title: str, *, timeout: int) -> tuple[str | None, dict]:
+    """Resolve a title to a DOI via Crossref; emit progress events.
+
+    Returns (doi_or_none, resolution_meta). resolution_meta is always populated
+    (with at least a ``query`` key) so callers can surface it in the result
+    envelope's meta slot for transparency / agent verification.
+    """
+    _progress("title_resolve_try", query=title)
+    doi, top_meta, candidates = try_crossref_title(title, timeout=timeout)
+    res_meta = {
+        "query": title,
+        "resolver": "crossref",
+        "candidates": candidates,
+    }
+    if not doi:
+        _progress("title_resolve_miss", query=title)
+        return None, res_meta
+    res_meta["resolved_doi"] = doi
+    res_meta["resolved_title"] = top_meta.get("title")
+    res_meta["match_score"] = top_meta.get("score")
+    _progress(
+        "title_resolve_hit",
+        query=title,
+        doi=doi,
+        title=top_meta.get("title"),
+        score=top_meta.get("score"),
+    )
+    return doi, res_meta
 
 
 def _default_format() -> str:
@@ -1531,6 +1654,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("doi", nargs="?", help="DOI to fetch (e.g. 10.1038/s41586-020-2649-2). Use '-' to read from stdin.")
+    ap.add_argument("--title", metavar="TITLE", help="paper title; resolved to a DOI via Crossref before download. Mutually exclusive with positional DOI / --batch.")
     ap.add_argument("--batch", metavar="FILE", help="file with one DOI per line for bulk download. Use '-' to read from stdin.")
     ap.add_argument("--out", default="pdfs", metavar="DIR", help="output directory (default: pdfs)")
     ap.add_argument("--dry-run", action="store_true", help="resolve sources without downloading; preview the PDF URL and filename")
@@ -1561,6 +1685,33 @@ def main():
         _progress("source_skip", source="unpaywall", reason="UNPAYWALL_EMAIL not set (top-level notice)")
 
     out_dir = Path(args.out)
+
+    # Title resolution — runs before DOI loading so the rest of the pipeline
+    # treats the resolved DOI as if it had been passed directly.
+    title_resolution: dict | None = None
+    if args.title:
+        # Reject simultaneous title + DOI / --batch up front rather than later.
+        if args.doi or args.batch:
+            _emit(_envelope_err(
+                "validation_error",
+                "--title cannot be combined with a positional DOI or --batch.",
+            ))
+            sys.exit(EXIT_VALIDATION)
+        resolved_doi, title_resolution = _resolve_title(args.title, timeout=args.timeout)
+        if not resolved_doi:
+            _emit(_envelope_err(
+                "title_resolve_failed",
+                f"Crossref returned no items for title: {args.title!r}",
+                retryable=False,
+                title_resolution=title_resolution,
+            ))
+            sys.exit(EXIT_UNRESOLVED)
+        # Inject the resolved DOI as the positional argument so downstream
+        # logic (DOI validation, fetch loop, idempotency replay) is identical.
+        # Clear args.title so the mutual-exclusion guard in _load_dois_from_args
+        # doesn't trip on the (now consumed) title.
+        args.doi = resolved_doi
+        args.title = None
 
     loaded = _load_dois_from_args(args)
     if isinstance(loaded, dict):
@@ -1626,6 +1777,8 @@ def main():
     meta_extra = {"sources_tried": sources_tried_union}
     if not EMAIL:
         meta_extra["unpaywall_skipped"] = True
+    if title_resolution is not None:
+        meta_extra["title_resolution"] = title_resolution
 
     if ok_flag is False:
         # Total failure of a single-DOI call — downgrade to an error envelope

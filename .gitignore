@@ -2,6 +2,10 @@
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
+
+# Local Claude Code workspace (per-user settings, transcripts, etc.)
+.claude/
 
 # Default download output (created on use)
 pdfs/
